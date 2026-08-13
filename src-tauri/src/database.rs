@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        AppSettings, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft, Project,
-        ProjectDraft, TranscriptSegment,
+        AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
+        Project, ProjectDraft, TranscriptSegment,
     },
     error::{AppError, AppResult},
 };
@@ -15,6 +15,7 @@ use crate::{
 const PERSON_COLORS: [&str; 6] = [
     "#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b", "#985b76",
 ];
+const MAX_CHAT_MESSAGE_CHARACTERS: usize = 12_000;
 
 #[derive(Clone)]
 pub struct Database {
@@ -88,6 +89,19 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS transcript_meeting_idx ON transcript_segments(meeting_id, start_ms);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL CHECK(scope_type IN ('meeting', 'project')),
+                scope_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS chat_scope_position_idx
+                ON chat_messages(scope_type, scope_id, position);
 
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -485,6 +499,119 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
+    pub fn chat_messages(&self, scope_type: &str, scope_id: &str) -> AppResult<Vec<ChatMessage>> {
+        validate_chat_scope(scope_type)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, scope_type, scope_id, role, content, position, created_at
+             FROM chat_messages
+             WHERE scope_type = ?1 AND scope_id = ?2
+             ORDER BY position",
+        )?;
+        let rows = statement.query_map(params![scope_type, scope_id], map_chat_message)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn prepare_chat_user_message(
+        &self,
+        scope_type: &str,
+        scope_id: &str,
+        content: String,
+        message_id: Option<&str>,
+    ) -> AppResult<ChatMessage> {
+        validate_chat_scope(scope_type)?;
+        let content = required_text(content, "Message")?;
+        if content.chars().count() > MAX_CHAT_MESSAGE_CHARACTERS {
+            return Err(AppError::Validation(format!(
+                "Messages can be up to {MAX_CHAT_MESSAGE_CHARACTERS} characters"
+            )));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+
+        let message = if let Some(message_id) = message_id {
+            let existing = transaction
+                .query_row(
+                    "SELECT id, scope_type, scope_id, role, content, position, created_at
+                     FROM chat_messages WHERE id = ?1",
+                    [message_id],
+                    map_chat_message,
+                )
+                .optional()?
+                .ok_or(AppError::NotFound("Chat message"))?;
+            if existing.scope_type != scope_type
+                || existing.scope_id != scope_id
+                || existing.role != "user"
+            {
+                return Err(AppError::Validation(
+                    "Only a user message in this conversation can be resent".to_string(),
+                ));
+            }
+            transaction.execute(
+                "UPDATE chat_messages SET content = ?1 WHERE id = ?2",
+                params![content, message_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM chat_messages
+                 WHERE scope_type = ?1 AND scope_id = ?2 AND position > ?3",
+                params![scope_type, scope_id, existing.position],
+            )?;
+            ChatMessage {
+                content,
+                ..existing
+            }
+        } else {
+            let position: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_messages
+                 WHERE scope_type = ?1 AND scope_id = ?2",
+                params![scope_type, scope_id],
+                |row| row.get(0),
+            )?;
+            let message = ChatMessage {
+                id: Uuid::new_v4().to_string(),
+                scope_type: scope_type.to_string(),
+                scope_id: scope_id.to_string(),
+                role: "user".to_string(),
+                content,
+                position,
+                created_at: Utc::now().to_rfc3339(),
+            };
+            insert_chat_message(&transaction, &message)?;
+            message
+        };
+
+        transaction.commit()?;
+        Ok(message)
+    }
+
+    pub fn append_chat_assistant_message(
+        &self,
+        scope_type: &str,
+        scope_id: &str,
+        content: String,
+    ) -> AppResult<ChatMessage> {
+        validate_chat_scope(scope_type)?;
+        let content = required_text(content, "Assistant response")?;
+        let connection = self.connection()?;
+        let position: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_messages
+             WHERE scope_type = ?1 AND scope_id = ?2",
+            params![scope_type, scope_id],
+            |row| row.get(0),
+        )?;
+        let message = ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            scope_type: scope_type.to_string(),
+            scope_id: scope_id.to_string(),
+            role: "assistant".to_string(),
+            content,
+            position,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        insert_chat_message(&connection, &message)?;
+        Ok(message)
+    }
+
     pub fn claim_person_reference(&self, person_id: &str, data_url: &str) -> AppResult<()> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
@@ -621,6 +748,45 @@ fn map_meeting(row: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
         audio_directory: row.get(9)?,
         error_message: row.get(10)?,
     })
+}
+
+fn map_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        scope_type: row.get(1)?,
+        scope_id: row.get(2)?,
+        role: row.get(3)?,
+        content: row.get(4)?,
+        position: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+fn insert_chat_message(connection: &Connection, message: &ChatMessage) -> AppResult<()> {
+    connection.execute(
+        "INSERT INTO chat_messages(id, scope_type, scope_id, role, content, position, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            message.id,
+            message.scope_type,
+            message.scope_id,
+            message.role,
+            message.content,
+            message.position,
+            message.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_chat_scope(scope_type: &str) -> AppResult<()> {
+    if matches!(scope_type, "meeting" | "project") {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "Unknown conversation scope".to_string(),
+        ))
+    }
 }
 
 fn required_text(value: String, label: &str) -> AppResult<String> {
@@ -944,5 +1110,70 @@ mod tests {
 
         assert_eq!(updated.duration_ms, 4_000);
         assert_eq!(database.segments().expect("segments").len(), 1);
+    }
+
+    #[test]
+    fn editing_a_chat_message_replaces_the_following_branch() {
+        let (_directory, database) = database();
+        let first = database
+            .prepare_chat_user_message(
+                "meeting",
+                "meeting-one",
+                "What was decided?".to_string(),
+                None,
+            )
+            .expect("first question");
+        database
+            .append_chat_assistant_message(
+                "meeting",
+                "meeting-one",
+                "The team chose option A.".to_string(),
+            )
+            .expect("first answer");
+        database
+            .prepare_chat_user_message("meeting", "meeting-one", "Why?".to_string(), None)
+            .expect("follow-up");
+
+        database
+            .prepare_chat_user_message(
+                "meeting",
+                "meeting-one",
+                "What follow-up was agreed?".to_string(),
+                Some(&first.id),
+            )
+            .expect("edited question");
+
+        let messages = database
+            .chat_messages("meeting", "meeting-one")
+            .expect("messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "What follow-up was agreed?");
+        assert_eq!(messages[0].position, 0);
+    }
+
+    #[test]
+    fn chat_history_is_isolated_by_scope() {
+        let (_directory, database) = database();
+        database
+            .prepare_chat_user_message("meeting", "shared", "Meeting".to_string(), None)
+            .expect("meeting message");
+        database
+            .prepare_chat_user_message("project", "shared", "Project".to_string(), None)
+            .expect("project message");
+
+        assert_eq!(
+            database
+                .chat_messages("meeting", "shared")
+                .expect("meeting history")[0]
+                .content,
+            "Meeting",
+        );
+        assert_eq!(
+            database
+                .chat_messages("project", "shared")
+                .expect("project history")[0]
+                .content,
+            "Project",
+        );
     }
 }

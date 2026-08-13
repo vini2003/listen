@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import type {
   AppSettings,
+  ChatMessage,
+  ChatScope,
   Meeting,
   MeetingDraft,
   MeetingPlacement,
@@ -28,6 +30,10 @@ interface WorkspaceState extends WorkspaceSnapshot {
   loading: boolean;
   busy: boolean;
   recordingPaused: boolean;
+  chatMessages: ChatMessage[];
+  chatScopeKey: string | null;
+  chatLoading: boolean;
+  chatBusy: boolean;
   toasts: AppToast[];
   canUndo: boolean;
   canRedo: boolean;
@@ -58,6 +64,8 @@ interface WorkspaceState extends WorkspaceSnapshot {
   getRecordingLevels: (meetingId: string) => Promise<RecordingLevels>;
   transcribeMeeting: (meetingId: string) => Promise<boolean>;
   loadSegmentAudio: (meetingId: string, startMs: number, endMs: number) => Promise<string>;
+  loadChat: (scope: ChatScope) => Promise<void>;
+  completeChat: (scope: ChatScope, content: string, messageId?: string | null) => Promise<boolean>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   dismissToast: (id: number) => void;
@@ -218,6 +226,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     loading: true,
     busy: false,
     recordingPaused: false,
+    chatMessages: [],
+    chatScopeKey: null,
+    chatLoading: false,
+    chatBusy: false,
     toasts: [],
     canUndo: false,
     canRedo: false,
@@ -532,6 +544,40 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       } catch (error) {
         showError(error);
         throw error;
+      }
+    },
+
+    async loadChat(scope) {
+      const scopeKey = `${scope.scopeType}:${scope.scopeId}`;
+      set({ chatScopeKey: scopeKey, chatMessages: [], chatLoading: true });
+      try {
+        const messages = await desktop.loadChatMessages(scope);
+        if (get().chatScopeKey === scopeKey) set({ chatMessages: messages });
+      } catch (error) {
+        showError(error);
+      } finally {
+        if (get().chatScopeKey === scopeKey) set({ chatLoading: false });
+      }
+    },
+
+    async completeChat(scope, content, messageId = null) {
+      const scopeKey = `${scope.scopeType}:${scope.scopeId}`;
+      set({ chatBusy: true });
+      try {
+        const messages = await desktop.completeChat(scope, content, messageId);
+        if (get().chatScopeKey === scopeKey) set({ chatMessages: messages });
+        return true;
+      } catch (error) {
+        showError(error);
+        try {
+          const messages = await desktop.loadChatMessages(scope);
+          if (get().chatScopeKey === scopeKey) set({ chatMessages: messages });
+        } catch {
+          // The original error is the useful one.
+        }
+        return false;
+      } finally {
+        set({ chatBusy: false });
       }
     },
 

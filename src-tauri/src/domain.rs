@@ -100,6 +100,18 @@ pub struct RecordingLevels {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub role: String,
+    pub content: String,
+    pub position: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub microphone_device_id: Option<String>,
     pub system_device_id: Option<String>,

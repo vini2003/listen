@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  ChatMessage,
+  ChatScope,
   Meeting,
   MeetingDraft,
   MeetingPlacement,
@@ -46,6 +48,8 @@ export interface DesktopService {
   recordingLevels(meetingId: string): Promise<RecordingLevels>;
   transcribeMeeting(meetingId: string): Promise<Meeting>;
   loadSegmentAudio(meetingId: string, startMs: number, endMs: number): Promise<string>;
+  loadChatMessages(scope: ChatScope): Promise<ChatMessage[]>;
+  completeChat(scope: ChatScope, content: string, messageId?: string | null): Promise<ChatMessage[]>;
 }
 
 const personColors = ["#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b"];
@@ -78,6 +82,10 @@ const tauriService: DesktopService = {
   transcribeMeeting: (meetingId) => invoke("transcribe_meeting", { meetingId }),
   loadSegmentAudio: (meetingId, startMs, endMs) =>
     invoke("load_segment_audio", { meetingId, startMs, endMs }),
+  loadChatMessages: ({ scopeType, scopeId }) =>
+    invoke("load_chat_messages", { scopeType, scopeId }),
+  completeChat: ({ scopeType, scopeId }, content, messageId = null) =>
+    invoke("complete_chat", { scopeType, scopeId, content, messageId }),
 };
 
 function isTauri(): boolean {
@@ -93,6 +101,7 @@ function createBrowserPreviewService(): DesktopService {
   let snapshot = readPreviewState();
   let activeTimer: number | null = null;
   let activeStartedAt: number | null = null;
+  let chatMessages = readPreviewChats();
   const deletedMeetings = new Map<string, { meeting: Meeting; segments: WorkspaceSnapshot["segments"] }>();
 
   function persist(): void {
@@ -276,7 +285,70 @@ function createBrowserPreviewService(): DesktopService {
     async loadSegmentAudio() {
       throw new Error("Audio playback is available in the desktop app.");
     },
+    async loadChatMessages(scope) {
+      return structuredClone(chatMessages.filter(
+        (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
+      ));
+    },
+    async completeChat(scope, content, messageId = null) {
+      const scoped = chatMessages.filter(
+        (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
+      );
+      if (messageId) {
+        const existing = scoped.find((message) => message.id === messageId && message.role === "user");
+        if (!existing) throw new Error("User message not found");
+        existing.content = content.trim();
+        chatMessages = chatMessages.filter((message) =>
+          message.scopeType !== scope.scopeType
+          || message.scopeId !== scope.scopeId
+          || message.position <= existing.position,
+        );
+      } else {
+        chatMessages.push(makePreviewChatMessage(scope, "user", content, scoped.length));
+      }
+      const nextPosition = chatMessages.filter(
+        (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
+      ).length;
+      chatMessages.push(makePreviewChatMessage(
+        scope,
+        "assistant",
+        "In the desktop build, GPT-5.6 Luna answers this using the saved transcript and the conversation so far.",
+        nextPosition,
+      ));
+      persistPreviewChats(chatMessages);
+      return structuredClone(chatMessages.filter(
+        (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
+      ));
+    },
   };
+}
+
+function makePreviewChatMessage(
+  scope: ChatScope,
+  role: "user" | "assistant",
+  content: string,
+  position: number,
+): ChatMessage {
+  return {
+    id: crypto.randomUUID(),
+    ...scope,
+    role,
+    content: content.trim(),
+    position,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function readPreviewChats(): ChatMessage[] {
+  try {
+    return JSON.parse(localStorage.getItem("listen-browser-preview-chat-v1") || "[]") as ChatMessage[];
+  } catch {
+    return [];
+  }
+}
+
+function persistPreviewChats(messages: ChatMessage[]): void {
+  localStorage.setItem("listen-browser-preview-chat-v1", JSON.stringify(messages));
 }
 
 function makeMeeting(draft: MeetingDraft): Meeting {
@@ -301,6 +373,13 @@ function readPreviewState(): WorkspaceSnapshot {
     const snapshot = JSON.parse(saved) as WorkspaceSnapshot;
     snapshot.settings.pyannoteApiKeyConfigured ??= false;
     snapshot.meetings.forEach((meeting, index) => (meeting.position ??= index));
+    snapshot.devices = snapshot.devices.map((device) => device.kind === "system"
+      ? {
+          ...device,
+          name: device.name === "System audio" ? "Speaker" : device.name,
+          subtitle: device.subtitle?.replace(/system audio/gi, "speaker"),
+        }
+      : device);
     return snapshot;
   }
 

@@ -1,3 +1,4 @@
+mod ai_chat;
 mod audio;
 mod credentials;
 mod database;
@@ -16,8 +17,8 @@ use audio::RecordingManager;
 use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
-    AppSettings, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft, Project,
-    ProjectDraft, RecordingLevels, RecordingRequest, WorkspaceSnapshot,
+    AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
+    Project, ProjectDraft, RecordingLevels, RecordingRequest, WorkspaceSnapshot,
 };
 use error::{AppError, AppResult};
 use tauri::{Manager, State};
@@ -321,6 +322,53 @@ fn load_segment_audio(
     speech_audio::mixed_recording_clip_data_url(&directory, start_ms, end_ms)
 }
 
+#[tauri::command]
+fn load_chat_messages(
+    state: State<'_, AppState>,
+    scope_type: String,
+    scope_id: String,
+) -> AppResult<Vec<ChatMessage>> {
+    state.database.chat_messages(&scope_type, &scope_id)
+}
+
+#[tauri::command]
+async fn complete_chat(
+    state: State<'_, AppState>,
+    scope_type: String,
+    scope_id: String,
+    content: String,
+    message_id: Option<String>,
+) -> AppResult<Vec<ChatMessage>> {
+    if !credentials::has_openai_key()? {
+        return Err(AppError::Validation(
+            "Add a text model API key in Settings before asking a question".to_string(),
+        ));
+    }
+    let api_key = credentials::openai_key()?;
+    state.database.prepare_chat_user_message(
+        &scope_type,
+        &scope_id,
+        content,
+        message_id.as_deref(),
+    )?;
+    let answer = match ai_chat::answer(&state.database, &api_key, &scope_type, &scope_id).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            let diagnostic_id =
+                state
+                    .diagnostics
+                    .record_chat_error(&scope_type, &scope_id, &error.to_string());
+            return Err(AppError::OpenAi(format!(
+                "The text model could not answer that question. Error ID {diagnostic_id}."
+            )));
+        }
+    };
+    state
+        .database
+        .append_chat_assistant_message(&scope_type, &scope_id, answer)?;
+    state.database.chat_messages(&scope_type, &scope_id)
+}
+
 async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Meeting> {
     state.database.mark_processing(meeting_id)?;
     let report = match transcription::transcribe_meeting(&state.database, meeting_id).await {
@@ -404,6 +452,8 @@ pub fn run() {
             recording_levels,
             transcribe_meeting,
             load_segment_audio,
+            load_chat_messages,
+            complete_chat,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Listen");

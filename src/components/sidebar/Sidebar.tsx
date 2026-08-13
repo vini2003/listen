@@ -421,11 +421,6 @@ function MeetingRow({
   return (
     <div
       className={`meeting-row-shell ${dragging ? "dragging" : ""}`}
-      draggable={!renaming}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
       onPointerDown={(event) => event.stopPropagation()}
     >
       {renaming ? (
@@ -444,8 +439,13 @@ function MeetingRow({
       ) : (
         <button
           className={`sidebar-row meeting-row ${selected ? "selected" : ""}`}
+          draggable
           onClick={onSelect}
           onContextMenu={onContextMenu}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
         >
           <span className="meeting-row-copy"><span>{meeting.title}</span></span>
         </button>

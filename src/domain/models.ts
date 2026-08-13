@@ -63,6 +63,23 @@ export interface RecordingLevels {
   elapsedMs: number;
 }
 
+export type ChatScopeType = "meeting" | "project";
+
+export interface ChatScope {
+  scopeType: ChatScopeType;
+  scopeId: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  scopeType: ChatScopeType;
+  scopeId: string;
+  role: "user" | "assistant";
+  content: string;
+  position: number;
+  createdAt: string;
+}
+
 export interface AppSettings {
   microphoneDeviceId: string | null;
   systemDeviceId: string | null;

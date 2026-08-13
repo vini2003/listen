@@ -1,20 +1,22 @@
 import { Mic, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
-import type { Meeting } from "../../domain/models";
+import type { Meeting, Project } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
 import { useWorkspace } from "../../store/workspace";
 import { Modal } from "../ui/Modal";
+import { MeetingChat } from "./MeetingChat";
 import { RecordingDock } from "./RecordingDock";
 import { Transcript } from "./Transcript";
 
 interface MeetingViewProps {
   meeting: Meeting;
+  project: Project | null;
   onOpenPeople: () => void;
 }
 
-export function MeetingView({ meeting, onOpenPeople }: MeetingViewProps) {
+export function MeetingView({ meeting, project, onOpenPeople }: MeetingViewProps) {
   const { busy, renameMeeting, deleteMeeting } = useWorkspace();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(meeting.title);
@@ -92,6 +94,7 @@ export function MeetingView({ meeting, onOpenPeople }: MeetingViewProps) {
       </section>
 
       <RecordingDock meeting={meeting} />
+      <MeetingChat meeting={meeting} project={project} />
 
       <Modal open={deleteOpen} title="Delete?" description="You can undo this action with Ctrl+Z." onClose={() => setDeleteOpen(false)} size="small">
         <div className="confirmation-content">

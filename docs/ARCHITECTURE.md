@@ -15,6 +15,7 @@ The codebase is separated by responsibility rather than framework convenience:
 - `src-tauri/src/transcription.rs` owns transcript and identity orchestration.
 - `src-tauri/src/voice_reference.rs` owns clean-sample selection and voiceprint learning.
 - `src-tauri/src/transcript_cleanup.rs` owns bounded, schema-validated text refinement.
+- `src-tauri/src/ai_chat.rs` owns bounded transcript context, conversation prompting, and GPT-5.6 Luna responses.
 - `src-tauri/src/credentials.rs` is the only module allowed to access the platform credential vault.
 
 ## Recording lifecycle
@@ -25,10 +26,18 @@ The codebase is separated by responsibility rather than framework convenience:
 4. Stopping capture drops every native stream and finalizes each WAV header before the meeting becomes ready.
 5. Transcription streams a normalized 16 kHz mono render to temporary pyannote media storage and runs Precision-2 with speaker-attributed STT.
 6. When voiceprints exist, identification runs in parallel. Identities are joined to transcript turns by timestamp overlap, never by a job-local `SPEAKER_XX` label.
-7. Manual speaker assignment updates every matching turn immediately. A background task selects an isolated, non-overlapping microphone or system-audio passage and learns one voiceprint for future meetings.
+7. Manual speaker assignment updates every matching turn immediately. A background task selects an isolated, non-overlapping microphone or speaker passage and learns one voiceprint for future meetings.
 8. The raw segment text is retained in SQLite while bounded Luna requests conservatively correct likely ASR mistakes and punctuation. Invalid or unavailable cleanup results are discarded without failing the recording.
 
-Keeping microphone and system audio as separate tracks avoids realtime resampling and clock-drift corruption. It also prevents a voiceprint from being learned from a mixed passage containing both the local and remote speaker.
+Keeping microphone and speaker audio as separate tracks avoids realtime resampling and clock-drift corruption. It also prevents a voiceprint from being learned from a mixed passage containing both the local and remote speaker.
+
+## Meeting conversations
+
+- Recording and project conversations are separate scopes with independently ordered SQLite histories.
+- Editing or resending a user message replaces the later branch before a new answer is generated.
+- Transcript material is assembled locally with participant names, recording titles, and timestamps, then bounded before being sent with recent chat history.
+- GPT-5.6 Luna runs through the Responses API with remote response storage disabled.
+- Failures preserve the user message, surface as toasts, and write a sanitized diagnostic ID without logging transcript contents or credentials.
 
 ## Long-running reliability
 

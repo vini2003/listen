@@ -721,8 +721,8 @@ fn visual_level_from_rms(rms: f32) -> f32 {
     }
 
     let decibels = 20.0 * rms.log10();
-    let normalized = ((decibels - METER_FLOOR_DB) / (METER_CEILING_DB - METER_FLOOR_DB))
-        .clamp(0.0, 1.0);
+    let normalized =
+        ((decibels - METER_FLOOR_DB) / (METER_CEILING_DB - METER_FLOOR_DB)).clamp(0.0, 1.0);
     normalized.powf(METER_RESPONSE)
 }
 

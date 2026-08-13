@@ -64,6 +64,18 @@ impl Diagnostics {
         diagnostic_id
     }
 
+    pub fn record_chat_error(&self, scope_type: &str, scope_id: &str, detail: &str) -> String {
+        self.record_event(
+            "chat.error",
+            &format!(
+                "scope_type={} scope_id={} detail={}",
+                sanitize_field(scope_type),
+                sanitize_field(scope_id),
+                sanitize(detail),
+            ),
+        )
+    }
+
     pub fn record_pipeline_warning(&self, meeting_id: &str, stage: &str, detail: &str) -> String {
         self.record_event(
             "transcription.warning",
