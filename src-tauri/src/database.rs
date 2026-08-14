@@ -687,6 +687,19 @@ impl Database {
         Ok(())
     }
 
+    pub fn recover_interrupted_voice_profiles(&self) -> AppResult<()> {
+        self.connection()?.execute(
+            "UPDATE voice_profiles
+             SET status = 'pending_sample',
+                 last_error = 'Local voice profile storage was upgraded; enrollment will retry',
+                 updated_at = ?1
+             WHERE status = 'learning'
+                OR (status = 'failed' AND LOWER(COALESCE(last_error, '')) LIKE '%platform limit%')",
+            [Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_voice_profile_pending(&self, person_id: &str, detail: &str) -> AppResult<()> {
         self.connection()?.execute(
             "UPDATE voice_profiles SET status = 'pending_sample', last_error = ?1, updated_at = ?2
@@ -1271,6 +1284,23 @@ mod tests {
         database
             .set_person_voice_consent(&vinicius.id, true)
             .expect("confirm permission");
+        database
+            .mark_voice_profile_failed(
+                &vinicius.id,
+                "Attribute password encoded as UTF-16 is longer than platform limit",
+            )
+            .expect("record legacy storage failure");
+        database
+            .recover_interrupted_voice_profiles()
+            .expect("recover legacy storage failure");
+        assert_eq!(
+            database.people().expect("people")[0]
+                .voice_profile
+                .as_ref()
+                .expect("voice profile")
+                .status,
+            "pending_sample"
+        );
         database
             .save_voice_profile(
                 &vinicius.id,

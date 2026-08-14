@@ -18,6 +18,7 @@ use crate::{
     },
     speech_audio,
     transcript_cleanup::{self, CleanupContext},
+    voice_profile_store::VoiceProfileStore,
     voice_reference,
 };
 
@@ -51,6 +52,7 @@ pub struct TranscriptionReport {
 
 pub async fn transcribe_meeting(
     database: &Database,
+    voice_profiles: &VoiceProfileStore,
     meeting_id: &str,
 ) -> AppResult<TranscriptionReport> {
     let meeting = database.meeting(meeting_id)?;
@@ -104,28 +106,40 @@ pub async fn transcribe_meeting(
     let people = database.people()?;
     let settings = database.settings()?;
     let candidate_ids = identification_candidate_ids(database, &meeting, &settings)?;
-    let known_people = database
-        .voice_profiles()?
-        .into_iter()
-        .filter(|profile| {
-            candidate_ids.contains(&profile.person_id)
-                && profile.status == "ready"
-                && profile.consent_confirmed_at.is_some()
-        })
-        .filter_map(|profile| {
-            let voiceprint = credentials::voiceprint(&profile.person_id)
-                .ok()
-                .flatten()
-                .or(profile.voiceprint)?;
-            Some(KnownVoiceprint {
+    let mut known_people = Vec::new();
+    let mut profile_storage_warnings = Vec::new();
+    for profile in database.voice_profiles()?.into_iter().filter(|profile| {
+        candidate_ids.contains(&profile.person_id)
+            && profile.status == "ready"
+            && profile.consent_confirmed_at.is_some()
+    }) {
+        if known_people.len() >= 50 {
+            break;
+        }
+        match voice_profiles.load(&profile.person_id) {
+            Ok(Some(voiceprint)) => known_people.push(KnownVoiceprint {
                 label: profile.person_id,
                 voiceprint,
-            })
-        })
-        .take(50)
-        .collect::<Vec<_>>();
+            }),
+            Ok(None) => {
+                if let Some(voiceprint) = profile.voiceprint {
+                    known_people.push(KnownVoiceprint {
+                        label: profile.person_id,
+                        voiceprint,
+                    });
+                } else {
+                    profile_storage_warnings.push(format!(
+                        "person={} encrypted profile is missing",
+                        profile.person_id
+                    ));
+                }
+            }
+            Err(error) => profile_storage_warnings
+                .push(format!("person={} detail={error}", profile.person_id)),
+        }
+    }
 
-    let (transcription, identification, identification_error) = if known_people.is_empty() {
+    let (transcription, identification, mut identification_error) = if known_people.is_empty() {
         (
             client.transcribe(&media_url, minimum_speakers).await?,
             None,
@@ -141,6 +155,16 @@ pub async fn transcribe_meeting(
             Err(error) => (transcription?, None, Some(error.to_string())),
         }
     };
+    if !profile_storage_warnings.is_empty() {
+        let storage_warning = format!(
+            "voice_profile_storage {}",
+            profile_storage_warnings.join("; ")
+        );
+        identification_error = Some(match identification_error {
+            Some(existing) => format!("{existing}; {storage_warning}"),
+            None => storage_warning,
+        });
+    }
 
     if transcription.turn_level_transcription.is_empty() {
         return Err(AppError::Pyannote(
@@ -239,7 +263,7 @@ pub async fn transcribe_meeting(
     for decision in &mut identity_decisions {
         if segments.iter().any(|segment| {
             segment.speaker_label == format!("precision:{}", decision.speaker)
-                && segment.identity_source.as_deref() == Some("microphone")
+                && segment.identity_source.as_deref() == Some("local_microphone")
         }) {
             decision.reason = "local_microphone".to_string();
         }

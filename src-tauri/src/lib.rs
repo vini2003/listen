@@ -9,6 +9,7 @@ mod pyannote;
 mod speech_audio;
 mod transcript_cleanup;
 mod transcription;
+mod voice_profile_store;
 mod voice_reference;
 
 use std::path::PathBuf;
@@ -24,11 +25,13 @@ use domain::{
 };
 use error::{AppError, AppResult};
 use tauri::{Manager, State};
+use voice_profile_store::VoiceProfileStore;
 
 struct AppState {
     database: Database,
     recordings_directory: PathBuf,
     diagnostics: Diagnostics,
+    voice_profiles: VoiceProfileStore,
 }
 
 #[tauri::command]
@@ -143,7 +146,8 @@ fn update_person(state: State<'_, AppState>, id: String, draft: PersonDraft) -> 
 
 #[tauri::command]
 fn delete_person(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    credentials::delete_voiceprint(&id)?;
+    state.voice_profiles.delete(&id)?;
+    credentials::delete_legacy_voiceprint(&id)?;
     state.database.delete_person(&id)?;
     let mut settings = state.database.settings()?;
     if settings.local_speaker_person_id.as_deref() == Some(id.as_str()) {
@@ -195,25 +199,32 @@ fn set_person_voice_consent(
             ));
         }
     }
-    let vaulted_voiceprint_exists = credentials::voiceprint(&person_id)?.is_some();
-    let legacy_voiceprint = state
-        .database
-        .voice_profiles()?
-        .into_iter()
-        .find(|profile| profile.person_id == person_id)
-        .and_then(|profile| profile.voiceprint);
+    let stored_voiceprint_exists = confirmed && state.voice_profiles.load(&person_id)?.is_some();
+    let legacy_voiceprint = if confirmed {
+        state
+            .database
+            .voice_profiles()?
+            .into_iter()
+            .find(|profile| profile.person_id == person_id)
+            .and_then(|profile| profile.voiceprint)
+            .or(credentials::legacy_voiceprint(&person_id)?)
+    } else {
+        None
+    };
     if !confirmed {
-        credentials::delete_voiceprint(&person_id)?;
+        state.voice_profiles.delete(&person_id)?;
+        credentials::delete_legacy_voiceprint(&person_id)?;
     }
     state
         .database
         .set_person_voice_consent(&person_id, confirmed)?;
     if confirmed {
         if let Some(voiceprint) = legacy_voiceprint {
-            credentials::set_voiceprint(&person_id, &voiceprint)?;
+            state.voice_profiles.store(&person_id, &voiceprint)?;
             state.database.clear_voiceprint_blob(&person_id)?;
+            credentials::delete_legacy_voiceprint(&person_id)?;
             state.database.activate_existing_voice_profile(&person_id)?;
-        } else if vaulted_voiceprint_exists {
+        } else if stored_voiceprint_exists {
             state.database.activate_existing_voice_profile(&person_id)?;
         }
     }
@@ -235,7 +246,8 @@ fn set_person_voice_consent(
 #[tauri::command]
 fn withdraw_biometric_consent(state: State<'_, AppState>) -> AppResult<AppSettings> {
     for profile in state.database.voice_profiles()? {
-        credentials::delete_voiceprint(&profile.person_id)?;
+        state.voice_profiles.delete(&profile.person_id)?;
+        credentials::delete_legacy_voiceprint(&profile.person_id)?;
     }
     state.database.delete_all_voice_profiles()?;
     let mut settings = state.database.settings()?;
@@ -272,7 +284,9 @@ async fn enroll_voice_profile(
             &person_id,
         )
         .await?;
-        credentials::set_voiceprint(&person_id, &reference.voiceprint)?;
+        state
+            .voice_profiles
+            .store(&person_id, &reference.voiceprint)?;
         if let Err(error) = state.database.save_voice_profile(
             &person_id,
             &meeting_id,
@@ -281,7 +295,7 @@ async fn enroll_voice_profile(
             reference.clip_count,
             &reference.source,
         ) {
-            let _ = credentials::delete_voiceprint(&person_id);
+            let _ = state.voice_profiles.delete(&person_id);
             return Err(error);
         }
         Ok::<_, AppError>(reference)
@@ -476,20 +490,23 @@ async fn complete_chat(
 
 async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Meeting> {
     state.database.mark_processing(meeting_id)?;
-    let report = match transcription::transcribe_meeting(&state.database, meeting_id).await {
-        Ok(report) => report,
-        Err(error) => {
-            let (category, message) = transcription::failure_summary(&error);
-            let diagnostic_id = state.diagnostics.record_transcription_error(
-                meeting_id,
-                category,
-                &error.to_string(),
-            );
-            let public_message = format!("{message} Error ID {diagnostic_id}.");
-            let _ = state.database.mark_failed(meeting_id, &public_message);
-            return Err(AppError::Pyannote(public_message));
-        }
-    };
+    let report =
+        match transcription::transcribe_meeting(&state.database, &state.voice_profiles, meeting_id)
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                let (category, message) = transcription::failure_summary(&error);
+                let diagnostic_id = state.diagnostics.record_transcription_error(
+                    meeting_id,
+                    category,
+                    &error.to_string(),
+                );
+                let public_message = format!("{message} Error ID {diagnostic_id}.");
+                let _ = state.database.mark_failed(meeting_id, &public_message);
+                return Err(AppError::Pyannote(public_message));
+            }
+        };
     if let Some(error) = report.cleanup_error {
         state.diagnostics.record_cleanup_error(meeting_id, &error);
     }
@@ -534,10 +551,23 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let database = Database::open(app_data_dir.clone())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            database
+                .recover_interrupted_voice_profiles()
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            let voice_profiles = VoiceProfileStore::new(app_data_dir.join("voice-profiles"));
             for profile in database.voice_profiles().unwrap_or_default() {
-                if let Some(voiceprint) = profile.voiceprint {
-                    if credentials::set_voiceprint(&profile.person_id, &voiceprint).is_ok() {
+                let legacy = profile.voiceprint.or_else(|| {
+                    credentials::legacy_voiceprint(&profile.person_id)
+                        .ok()
+                        .flatten()
+                });
+                if let Some(voiceprint) = legacy {
+                    if voice_profiles
+                        .store(&profile.person_id, &voiceprint)
+                        .is_ok()
+                    {
                         let _ = database.clear_voiceprint_blob(&profile.person_id);
+                        let _ = credentials::delete_legacy_voiceprint(&profile.person_id);
                     }
                 }
             }
@@ -545,6 +575,7 @@ pub fn run() {
                 database,
                 recordings_directory: app_data_dir.join("recordings"),
                 diagnostics: Diagnostics::new(&app_data_dir),
+                voice_profiles,
             });
             app.manage(RecordingManager::default());
             Ok(())

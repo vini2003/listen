@@ -272,6 +272,15 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           ...snapshot,
           selectedMeetingId: snapshot.meetings[0]?.id ?? null,
         });
+        if (snapshot.settings.speakerIdentificationEnabled && snapshot.settings.pyannoteApiKeyConfigured) {
+          for (const person of snapshot.people) {
+            if (person.voiceProfile?.status !== "pending_sample" || !person.voiceProfile.consentConfirmedAt) continue;
+            const assigned = snapshot.segments
+              .filter((segment) => segment.personId === person.id)
+              .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0];
+            if (assigned) void enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, person.id);
+          }
+        }
         const selected = snapshot.meetings[0];
         if (selected?.status === "failed" && selected.errorMessage) {
           showError(selected.errorMessage);

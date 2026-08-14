@@ -6,6 +6,7 @@ const SERVICE: &str = "app.listen.desktop";
 const OPENAI_ACCOUNT: &str = "openai-api-key";
 const PYANNOTE_ACCOUNT: &str = "pyannote-api-key";
 const VOICEPRINT_PREFIX: &str = "voiceprint-";
+const VOICE_PROFILE_KEY_ACCOUNT: &str = "voice-profile-master-key-v1";
 
 pub fn has_openai_key() -> AppResult<bool> {
     has_key(OPENAI_ACCOUNT)
@@ -31,7 +32,7 @@ pub fn pyannote_key() -> AppResult<String> {
     read_key(PYANNOTE_ACCOUNT)
 }
 
-pub fn voiceprint(person_id: &str) -> AppResult<Option<String>> {
+pub fn legacy_voiceprint(person_id: &str) -> AppResult<Option<String>> {
     let account = format!("{VOICEPRINT_PREFIX}{person_id}");
     match entry(&account)?.get_password() {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
@@ -40,12 +41,19 @@ pub fn voiceprint(person_id: &str) -> AppResult<Option<String>> {
     }
 }
 
-pub fn set_voiceprint(person_id: &str, value: &str) -> AppResult<()> {
-    let account = format!("{VOICEPRINT_PREFIX}{person_id}");
-    store_key(&account, value).map(|_| ())
+pub fn voice_profile_master_key() -> AppResult<Option<String>> {
+    match entry(VOICE_PROFILE_KEY_ACCOUNT)?.get_password() {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(credential_error(error)),
+    }
 }
 
-pub fn delete_voiceprint(person_id: &str) -> AppResult<()> {
+pub fn set_voice_profile_master_key(value: &str) -> AppResult<()> {
+    store_key(VOICE_PROFILE_KEY_ACCOUNT, value).map(|_| ())
+}
+
+pub fn delete_legacy_voiceprint(person_id: &str) -> AppResult<()> {
     let account = format!("{VOICEPRINT_PREFIX}{person_id}");
     match entry(&account)?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
@@ -98,7 +106,7 @@ fn store_key(account: &str, value: &str) -> AppResult<bool> {
     let stored_value = credential.get_password().map_err(credential_error)?;
     if stored_value != value {
         return Err(AppError::Credential(
-            "The operating system credential vault did not retain the API key".to_string(),
+            "The operating system credential vault did not retain the secret".to_string(),
         ));
     }
 
