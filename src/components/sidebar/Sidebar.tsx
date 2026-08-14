@@ -38,8 +38,14 @@ type DropSpot = MeetingDropSpot;
 
 const PROJECT_TOGGLE_DELAY_MS = 140;
 
-interface ContextMenuState {
+interface MeetingContextMenuState {
   meetingId: string;
+  x: number;
+  y: number;
+}
+
+interface ProjectContextMenuState {
+  projectId: string;
   x: number;
   y: number;
 }
@@ -60,6 +66,7 @@ export function Sidebar({
     reorderProjects,
     renameProject,
     renameMeeting,
+    deleteProject,
     deleteMeeting,
     busy,
   } = useWorkspace();
@@ -69,11 +76,13 @@ export function Sidebar({
   const [draggedMeetingId, setDraggedMeetingId] = useState<string | null>(null);
   const [dropSpot, setDropSpot] = useState<DropSpot | null>(null);
   const [hoveredCollectionKey, setHoveredCollectionKey] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [contextMenu, setContextMenu] = useState<MeetingContextMenuState | null>(null);
+  const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectRenameValue, setProjectRenameValue] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [projectDeleteCandidate, setProjectDeleteCandidate] = useState<Project | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<Meeting | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const dragPreviewRef = useRef<HTMLDivElement | null>(null);
@@ -94,21 +103,30 @@ export function Sidebar({
   }, []);
 
   useEffect(() => {
-    if (!contextMenu) return;
+    if (!contextMenu && !projectContextMenu) return;
     function dismiss(event: PointerEvent): void {
-      if (!contextMenuRef.current?.contains(event.target as Node)) setContextMenu(null);
+      if (!contextMenuRef.current?.contains(event.target as Node)) {
+        setContextMenu(null);
+        setProjectContextMenu(null);
+      }
     }
     function closeOnEscape(event: KeyboardEvent): void {
-      if (event.key === "Escape") setContextMenu(null);
+      if (event.key === "Escape") {
+        setContextMenu(null);
+        setProjectContextMenu(null);
+      }
     }
     window.addEventListener("pointerdown", dismiss, true);
     window.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("blur", () => setContextMenu(null), { once: true });
+    window.addEventListener("blur", () => {
+      setContextMenu(null);
+      setProjectContextMenu(null);
+    }, { once: true });
     return () => {
       window.removeEventListener("pointerdown", dismiss, true);
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [contextMenu]);
+  }, [contextMenu, projectContextMenu]);
 
   const meetingsByProject = useMemo(() => {
     const groups = new Map<string, Meeting[]>();
@@ -120,6 +138,7 @@ export function Sidebar({
   }, [meetings]);
   const miscellaneous = meetingsByProject.get("__unsorted__") ?? [];
   const contextMeeting = meetings.find((meeting) => meeting.id === contextMenu?.meetingId) ?? null;
+  const contextProject = projects.find((project) => project.id === projectContextMenu?.projectId) ?? null;
 
   function toggleProject(id: string): void {
     setExpanded((current) => {
@@ -205,6 +224,20 @@ export function Sidebar({
       x: Math.min(event.clientX, window.innerWidth - width - 10),
       y: Math.min(event.clientY, window.innerHeight - height - 10),
     });
+    setProjectContextMenu(null);
+  }
+
+  function openProjectContextMenu(event: MouseEvent, project: Project): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const width = 238;
+    const height = 94;
+    setProjectContextMenu({
+      projectId: project.id,
+      x: Math.min(event.clientX, window.innerWidth - width - 10),
+      y: Math.min(event.clientY, window.innerHeight - height - 10),
+    });
+    setContextMenu(null);
   }
 
   function beginRename(meeting: Meeting): void {
@@ -321,6 +354,7 @@ export function Sidebar({
                 >
                   <div
                     className="sidebar-row project-row"
+                    onContextMenu={(event) => openProjectContextMenu(event, project)}
                     onDragOver={(event) => {
                       updateDropSpot(event, project.id, projectMeetings.length);
                       if (!isExpanded) setExpanded((current) => new Set(current).add(project.id));
@@ -412,8 +446,28 @@ export function Sidebar({
       </footer>
 
       <AnimatePresence>
+        {projectContextMenu && contextProject ? (
+          <motion.div
+            key="project-context-menu"
+            ref={contextMenuRef}
+            className="recording-context-menu"
+            style={{ left: projectContextMenu.x, top: projectContextMenu.y }}
+            initial={{ opacity: 0, scale: 0.97, y: -3 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.98, y: -2 }}
+            transition={{ duration: 0.12 }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button onClick={() => { setProjectContextMenu(null); beginProjectRename(contextProject); }}><Pencil size={15} /> Rename</button>
+            <div className="menu-divider" />
+            <button className="danger-menu-item" onClick={() => { setProjectContextMenu(null); setProjectDeleteCandidate(contextProject); }}>
+              <Trash2 size={15} /> Delete
+            </button>
+          </motion.div>
+        ) : null}
         {contextMenu && contextMeeting ? (
           <motion.div
+            key="meeting-context-menu"
             ref={contextMenuRef}
             className="recording-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
@@ -431,6 +485,33 @@ export function Sidebar({
           </motion.div>
         ) : null}
       </AnimatePresence>
+
+      <Modal
+        open={Boolean(projectDeleteCandidate)}
+        title="Delete project?"
+        description="Its recordings will move to Unsorted. Their audio and transcripts will remain available."
+        onClose={() => setProjectDeleteCandidate(null)}
+        size="small"
+      >
+        <div className="confirmation-content">
+          <p><strong>{projectDeleteCandidate?.name}</strong> will be removed from the sidebar.</p>
+          <div className="dialog-actions">
+            <button className="secondary-button" onClick={() => setProjectDeleteCandidate(null)}>Cancel</button>
+            <button
+              className="danger-button"
+              disabled={busy}
+              onClick={() => {
+                if (!projectDeleteCandidate) return;
+                void deleteProject(projectDeleteCandidate.id).then((deleted) => {
+                  if (deleted) setProjectDeleteCandidate(null);
+                });
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={Boolean(deleteCandidate)}
