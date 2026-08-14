@@ -152,14 +152,11 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
                 onPointerCancel={finishResize}
               ><span /></div>
             ) : null}
-            <div className="meeting-chat-header">
-              <span className="meeting-chat-title"><Sparkles size={15} /> Ask</span>
-              {!wideLayout ? (
-                <button className="chat-icon-button" onClick={() => setExpanded(false)} aria-label="Close Ask">
-                  <X size={15} />
-                </button>
-              ) : null}
-            </div>
+            {!wideLayout ? (
+              <button className="chat-close-button" onClick={() => setExpanded(false)} aria-label="Close Ask">
+                <X size={14} />
+              </button>
+            ) : null}
 
             <div className="meeting-chat-messages" ref={scrollRef}>
               {chatLoading ? (
@@ -224,8 +221,13 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
       </AnimatePresence>
 
       <div className="meeting-chat-composer">
-        {!panelVisible ? (
-          <button className="chat-expand-button" onClick={() => setExpanded(true)} aria-label="Open conversation">
+        {!wideLayout ? (
+          <button
+            className="chat-expand-button"
+            onClick={() => setExpanded((current) => !current)}
+            aria-label={expanded ? "Close conversation" : "Open conversation"}
+            aria-expanded={expanded}
+          >
             <ChevronUp size={16} />
           </button>
         ) : null}
