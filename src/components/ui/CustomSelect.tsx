@@ -41,7 +41,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
     const openAbove = roomBelow < estimatedHeight + 12 && rect.top > roomBelow;
     setPosition({
       left: Math.min(rect.left, window.innerWidth - rect.width - 12),
-      top: openAbove ? rect.top - 7 : rect.bottom + 7,
+      top: openAbove ? Math.max(12, rect.top - estimatedHeight - 7) : rect.bottom + 7,
       width: rect.width,
       openAbove,
     });

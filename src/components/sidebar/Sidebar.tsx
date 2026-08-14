@@ -22,6 +22,7 @@ import {
   type MouseEvent,
 } from "react";
 import type { Meeting } from "../../domain/models";
+import { meaningfulMeetingDrop, type MeetingDropSpot } from "../../lib/meetingDrop";
 import { useWorkspace } from "../../store/workspace";
 import { ProjectActions } from "../project/ProjectActions";
 import { Modal } from "../ui/Modal";
@@ -33,10 +34,7 @@ interface SidebarProps {
   onOpenSettings: () => void;
 }
 
-interface DropSpot {
-  projectId: string | null;
-  index: number;
-}
+type DropSpot = MeetingDropSpot;
 
 interface ContextMenuState {
   meetingId: string;
@@ -66,6 +64,7 @@ export function Sidebar({
   const [orderedProjects, setOrderedProjects] = useState(projects);
   const [draggedMeetingId, setDraggedMeetingId] = useState<string | null>(null);
   const [dropSpot, setDropSpot] = useState<DropSpot | null>(null);
+  const [hoveredCollectionKey, setHoveredCollectionKey] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -130,6 +129,7 @@ export function Sidebar({
     event.dataTransfer.setDragImage(preview, 18, 18);
     dragPreviewRef.current = preview;
     setDraggedMeetingId(meeting.id);
+    setHoveredCollectionKey(collectionKey(meeting.projectId));
     setContextMenu(null);
   }
 
@@ -138,6 +138,7 @@ export function Sidebar({
     dragPreviewRef.current = null;
     setDraggedMeetingId(null);
     setDropSpot(null);
+    setHoveredCollectionKey(null);
   }
 
   function updateDropSpot(event: DragEvent, projectId: string | null, index: number): void {
@@ -145,7 +146,8 @@ export function Sidebar({
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = "move";
-    setDropSpot({ projectId, index });
+    setHoveredCollectionKey(collectionKey(projectId));
+    setDropSpot(draggedMeetingId ? meaningfulMeetingDrop(meetings, draggedMeetingId, { projectId, index }) : { projectId, index });
   }
 
   function updateRowDropSpot(event: DragEvent, projectId: string | null, index: number): void {
@@ -163,8 +165,9 @@ export function Sidebar({
     const meetingId = event.dataTransfer.getData("application/listen-meeting")
       || event.dataTransfer.getData("text/plain")
       || draggedMeetingId;
+    const destination = meetingId ? meaningfulMeetingDrop(meetings, meetingId, target) : null;
     finishMeetingDrag();
-    if (meetingId && target) await reorderMeeting(meetingId, target.projectId, target.index);
+    if (meetingId && destination) await reorderMeeting(meetingId, destination.projectId, destination.index);
   }
 
   function openContextMenu(event: MouseEvent, meeting: Meeting): void {
@@ -200,7 +203,11 @@ export function Sidebar({
       <>
         {projectMeetings.map((meeting, index) => (
           <Fragment key={meeting.id}>
-            <DropIndicator active={Boolean(draggedMeetingId && dropSpot?.projectId === projectId && dropSpot.index === index)} />
+            <DropIndicator
+              active={Boolean(draggedMeetingId && dropSpot?.projectId === projectId && dropSpot.index === index)}
+              onDragOver={(event) => updateDropSpot(event, projectId, index)}
+              onDrop={(event) => void commitDrop(event, { projectId, index })}
+            />
             <MeetingRow
               meeting={meeting}
               selected={meeting.id === selectedMeetingId}
@@ -219,7 +226,11 @@ export function Sidebar({
             />
           </Fragment>
         ))}
-        <DropIndicator active={Boolean(draggedMeetingId && dropSpot?.projectId === projectId && dropSpot.index === projectMeetings.length)} />
+        <DropIndicator
+          active={Boolean(draggedMeetingId && dropSpot?.projectId === projectId && dropSpot.index === projectMeetings.length)}
+          onDragOver={(event) => updateDropSpot(event, projectId, projectMeetings.length)}
+          onDrop={(event) => void commitDrop(event, { projectId, index: projectMeetings.length })}
+        />
       </>
     );
   }
@@ -257,7 +268,10 @@ export function Sidebar({
                 className="project-sort-item"
                 onDragEnd={() => void reorderProjects(orderedProjects.map((candidate) => candidate.id))}
               >
-                <div className={`project-group ${dropSpot?.projectId === project.id && draggedMeetingId ? "drop-target" : ""}`}>
+                <div
+                  className={`project-group ${hoveredCollectionKey === collectionKey(project.id) && draggedMeetingId ? "drop-target" : ""}`}
+                  onDragEnter={() => setHoveredCollectionKey(collectionKey(project.id))}
+                >
                   <div
                     className="sidebar-row project-row"
                     onDragOver={(event) => {
@@ -273,7 +287,7 @@ export function Sidebar({
                       <Folder size={16} />
                       <span>{project.name}</span>
                     </button>
-                    <ProjectActions project={project} placement="sidebar" onCreateMeeting={() => onCreateMeeting(project.id)} />
+                    <ProjectActions project={project} placement="sidebar" />
                   </div>
 
                   <AnimatePresence initial={false}>
@@ -284,15 +298,8 @@ export function Sidebar({
                         animate={{ height: "auto", opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
                         transition={{ duration: 0.16, ease: [0.2, 0.8, 0.2, 1] }}
-                        onDragOver={(event) => updateDropSpot(event, project.id, projectMeetings.length)}
-                        onDrop={(event) => void commitDrop(event, dropSpot?.projectId === project.id
-                          ? dropSpot
-                          : { projectId: project.id, index: projectMeetings.length })}
                       >
                         {renderMeetingList(project.id, projectMeetings)}
-                        <button className="add-project-recording" onClick={() => onCreateMeeting(project.id)}>
-                          <span>+</span> Add recording
-                        </button>
                       </motion.div>
                     ) : null}
                   </AnimatePresence>
@@ -310,18 +317,21 @@ export function Sidebar({
         </Reorder.Group>
 
         <div
-          className={`miscellaneous-section ${dropSpot?.projectId === null && draggedMeetingId ? "drop-target" : ""}`}
-          onDragOver={(event) => updateDropSpot(event, null, miscellaneous.length)}
+          className={`miscellaneous-section ${hoveredCollectionKey === collectionKey(null) && draggedMeetingId ? "drop-target" : ""}`}
+          onDragEnter={() => setHoveredCollectionKey(collectionKey(null))}
           onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropSpot(null);
+            if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) {
+              setDropSpot(null);
+              setHoveredCollectionKey(null);
+            }
           }}
-          onDrop={(event) => void commitDrop(event, dropSpot?.projectId === null
-            ? dropSpot
-            : { projectId: null, index: miscellaneous.length })}
         >
-          <div className="sidebar-section-heading misc-heading">
+          <div
+            className="sidebar-section-heading misc-heading"
+            onDragOver={(event) => updateDropSpot(event, null, miscellaneous.length)}
+            onDrop={(event) => void commitDrop(event, { projectId: null, index: miscellaneous.length })}
+          >
             <span>Unsorted</span>
-            <button className="mini-icon-button" onClick={() => onCreateMeeting(null)} aria-label="Create unsorted recording">+</button>
           </div>
           {renderMeetingList(null, miscellaneous)}
         </div>
@@ -381,8 +391,20 @@ export function Sidebar({
   );
 }
 
-function DropIndicator({ active }: { active: boolean }) {
-  return <div className={`meeting-drop-indicator ${active ? "active" : ""}`}><span /></div>;
+function DropIndicator({
+  active,
+  onDragOver,
+  onDrop,
+}: {
+  active: boolean;
+  onDragOver: (event: DragEvent) => void;
+  onDrop: (event: DragEvent) => void;
+}) {
+  return <div className={`meeting-drop-indicator ${active ? "active" : ""}`} onDragOver={onDragOver} onDrop={onDrop}><span /></div>;
+}
+
+function collectionKey(projectId: string | null): string {
+  return projectId ?? "__unsorted__";
 }
 
 interface MeetingRowProps {

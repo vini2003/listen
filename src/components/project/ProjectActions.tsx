@@ -1,4 +1,4 @@
-import { FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Check, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import type { Project } from "../../domain/models";
@@ -8,11 +8,10 @@ import { Modal } from "../ui/Modal";
 
 interface ProjectActionsProps {
   project: Project;
-  onCreateMeeting: () => void;
   placement?: "sidebar" | "page";
 }
 
-export function ProjectActions({ project, onCreateMeeting, placement = "page" }: ProjectActionsProps) {
+export function ProjectActions({ project, placement = "page" }: ProjectActionsProps) {
   const { renameProject, deleteProject, busy } = useWorkspace();
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -41,10 +40,9 @@ export function ProjectActions({ project, onCreateMeeting, placement = "page" }:
         <AnimatePresence>
           {menuOpen ? (
             <motion.div className="project-menu" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}>
-              <button onClick={() => { setMenuOpen(false); onCreateMeeting(); }}><FolderPlus size={15} /> New recording</button>
-              <button onClick={() => { setMenuOpen(false); setName(project.name); setRenameOpen(true); }}><Pencil size={15} /> Rename project</button>
+              <button onClick={() => { setMenuOpen(false); setName(project.name); setRenameOpen(true); }}><Pencil size={15} /> Rename</button>
               <div className="menu-divider" />
-              <button className="danger-menu-item" onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={15} /> Delete project</button>
+              <button className="danger-menu-item" onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={15} /> Delete</button>
             </motion.div>
           ) : null}
         </AnimatePresence>
@@ -53,7 +51,7 @@ export function ProjectActions({ project, onCreateMeeting, placement = "page" }:
       <Modal open={renameOpen} title="Rename project" onClose={() => setRenameOpen(false)} size="small">
         <form className="dialog-form" onSubmit={(event) => { event.preventDefault(); void saveRename(); }}>
           <label><span>Project name</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <div className="dialog-actions"><button type="button" className="secondary-button" onClick={() => setRenameOpen(false)}>Cancel</button><button className="primary-button" disabled={!name.trim() || busy}>Save</button></div>
+          <div className="dialog-actions"><button type="button" className="secondary-button" onClick={() => setRenameOpen(false)}>Cancel</button><button className="primary-button" disabled={!name.trim() || busy}><Check size={15} /> Save</button></div>
         </form>
       </Modal>
 

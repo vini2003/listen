@@ -73,7 +73,6 @@ export default function App() {
         {selectedMeeting ? (
           <MeetingView
             meeting={selectedMeeting}
-            project={workspace.projects.find((project) => project.id === selectedMeeting.projectId) ?? null}
             onOpenPeople={() => setPeopleOpen(true)}
           />
         ) : (

@@ -164,22 +164,22 @@ impl Diagnostics {
 
         #[cfg(target_os = "windows")]
         let mut command = {
-            let mut command = Command::new("explorer.exe");
-            command.arg(format!("/select,{}", self.path.display()));
+            let mut command = Command::new("notepad.exe");
+            command.arg(&self.path);
             command
         };
 
         #[cfg(target_os = "macos")]
         let mut command = {
             let mut command = Command::new("open");
-            command.arg("-R").arg(&self.path);
+            command.arg(&self.path);
             command
         };
 
         #[cfg(target_os = "linux")]
         let mut command = {
             let mut command = Command::new("xdg-open");
-            command.arg(self.path.parent().unwrap_or_else(|| Path::new(".")));
+            command.arg(&self.path);
             command
         };
 

@@ -1,4 +1,4 @@
-import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, LockKeyhole, MonitorSpeaker, Sparkles } from "lucide-react";
+import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, LockKeyhole, MonitorSpeaker, Save, Sparkles } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useWorkspace } from "../../store/workspace";
 import { CustomSelect } from "../ui/CustomSelect";
@@ -51,7 +51,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
             <div className="settings-heading"><div><h3>Transcription model</h3><p>Creates the transcript and separates speakers.</p></div>{settings.pyannoteApiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Configured</span> : null}</div>
             <form className="api-key-form" onSubmit={(event) => void savePyannoteKey(event)}>
               <div className="secret-input"><LockKeyhole size={16} /><input type={showPyannoteKey ? "text" : "password"} value={pyannoteKey} onChange={(event) => setPyannoteKey(event.target.value)} placeholder={settings.pyannoteApiKeyConfigured ? "Replace pyannote key" : "pyannote API key"} /><button type="button" onClick={() => setShowPyannoteKey((show) => !show)} aria-label={showPyannoteKey ? "Hide key" : "Show key"}>{showPyannoteKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
-              <button className="primary-button" disabled={!pyannoteKey.trim() || busy}>Save key</button>
+              <button className="primary-button" disabled={!pyannoteKey.trim() || busy}><Save size={15} /> Save key</button>
             </form>
           </div>
         </section>
@@ -62,7 +62,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
             <div className="settings-heading"><div><h3>Text model <small>Optional</small></h3><p>Cleans transcript text and powers questions about your meetings.</p></div>{settings.apiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Configured</span> : null}</div>
             <form className="api-key-form" onSubmit={(event) => void saveOpenAiKey(event)}>
               <div className="secret-input"><LockKeyhole size={16} /><input type={showOpenAiKey ? "text" : "password"} value={openAiKey} onChange={(event) => setOpenAiKey(event.target.value)} placeholder={settings.apiKeyConfigured ? "Replace OpenAI key" : "sk-…"} /><button type="button" onClick={() => setShowOpenAiKey((show) => !show)} aria-label={showOpenAiKey ? "Hide key" : "Show key"}>{showOpenAiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
-              <button className="secondary-button" disabled={!openAiKey.trim() || busy}>Save key</button>
+              <button className="secondary-button" disabled={!openAiKey.trim() || busy}><Save size={15} /> Save key</button>
             </form>
           </div>
         </section>

@@ -1,6 +1,5 @@
 import {
   Check,
-  ChevronDown,
   ChevronUp,
   Copy,
   LoaderCircle,
@@ -11,19 +10,29 @@ import {
   X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { ChatMessage, ChatScope, Meeting, Project } from "../../domain/models";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import type { ChatMessage, ChatScope, Meeting } from "../../domain/models";
+import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { useWorkspace } from "../../store/workspace";
-import { CustomSelect } from "../ui/CustomSelect";
 
 interface MeetingChatProps {
   meeting: Meeting;
-  project: Project | null;
 }
 
 const ReactMarkdown = lazy(() => import("react-markdown"));
+const DEFAULT_PANEL_HEIGHT = 360;
 
-export function MeetingChat({ meeting, project }: MeetingChatProps) {
+export function MeetingChat({ meeting }: MeetingChatProps) {
   const {
     settings,
     chatMessages,
@@ -32,42 +41,37 @@ export function MeetingChat({ meeting, project }: MeetingChatProps) {
     loadChat,
     completeChat,
   } = useWorkspace();
-  const [scopeType, setScopeType] = useState<"meeting" | "project">("meeting");
+  const wideLayout = useWideChatLayout();
   const [expanded, setExpanded] = useState(false);
+  const [panelHeight, setPanelHeight] = useState(readPanelHeight);
   const [draft, setDraft] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  const panelVisible = expanded || wideLayout;
+  const chatRef = useDismissableLayer<HTMLElement>(expanded && !wideLayout, () => setExpanded(false));
   const scope = useMemo<ChatScope>(() => ({
-    scopeType,
-    scopeId: scopeType === "project" && project ? project.id : meeting.id,
-  }), [meeting.id, project, scopeType]);
+    scopeType: "meeting",
+    scopeId: meeting.id,
+  }), [meeting.id]);
 
   useEffect(() => {
-    setScopeType("meeting");
     setExpanded(false);
     setDraft("");
     setEditingId(null);
   }, [meeting.id]);
 
   useEffect(() => {
-    if (scopeType === "project" && !project) setScopeType("meeting");
-  }, [project, scopeType]);
-
-  useEffect(() => {
     void loadChat(scope);
   }, [loadChat, scope.scopeId, scope.scopeType]);
 
   useEffect(() => {
-    if (chatMessages.length > 0) setExpanded(true);
-  }, [chatMessages.length]);
-
-  useEffect(() => {
-    if (!expanded) return;
+    if (!panelVisible) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [chatMessages, chatBusy, expanded]);
+  }, [chatMessages, chatBusy, panelVisible]);
 
   useEffect(() => resizeTextarea(textareaRef.current), [draft]);
 
@@ -100,38 +104,61 @@ export function MeetingChat({ meeting, project }: MeetingChatProps) {
     window.setTimeout(() => setCopiedId((current) => current === message.id ? null : current), 1_400);
   }
 
-  const scopeOptions = [
-    { value: "meeting", label: "This recording" },
-    ...(project ? [{ value: "project", label: project.name, description: "Entire project" }] : []),
-  ];
+  function beginResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    resizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: panelHeight };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function resizePanel(event: ReactPointerEvent<HTMLDivElement>): void {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const maximum = Math.max(240, window.innerHeight - 205);
+    setPanelHeight(Math.max(220, Math.min(maximum, resize.startHeight + resize.startY - event.clientY)));
+  }
+
+  function finishResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (resizeRef.current?.pointerId !== event.pointerId) return;
+    resizeRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    try { window.localStorage.setItem("listen.askPanelHeight", String(panelHeight)); } catch { /* Optional preference. */ }
+  }
 
   return (
     <section
-      className={`meeting-chat ${expanded ? "expanded" : "collapsed"}`}
+      ref={chatRef}
+      className={`meeting-chat ${panelVisible ? "expanded" : "collapsed"} ${wideLayout ? "wide" : ""}`}
+      style={{ "--chat-panel-height": `${panelHeight}px` } as CSSProperties}
     >
       <AnimatePresence initial={false}>
-        {expanded ? (
+        {panelVisible ? (
           <motion.div
             className="meeting-chat-panel"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
+            initial={{ opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 5 }}
             transition={{ duration: 0.17 }}
           >
+            {!wideLayout ? (
+              <div
+                className="chat-resize-handle"
+                role="separator"
+                aria-label="Resize Ask panel"
+                aria-orientation="horizontal"
+                onDoubleClick={() => setPanelHeight(DEFAULT_PANEL_HEIGHT)}
+                onPointerDown={beginResize}
+                onPointerMove={resizePanel}
+                onPointerUp={finishResize}
+                onPointerCancel={finishResize}
+              ><span /></div>
+            ) : null}
             <div className="meeting-chat-header">
-              <span className="meeting-chat-title"><Sparkles size={15} /> Ask Listen</span>
-              <div className="meeting-chat-scope">
-                <CustomSelect
-                  compact
-                  ariaLabel="Conversation scope"
-                  value={scopeType}
-                  options={scopeOptions}
-                  onChange={(value) => setScopeType(value as "meeting" | "project")}
-                />
-              </div>
-              <button className="chat-icon-button" onClick={() => setExpanded(false)} aria-label="Collapse conversation">
-                <ChevronDown size={16} />
-              </button>
+              <span className="meeting-chat-title"><Sparkles size={15} /> Ask</span>
+              {!wideLayout ? (
+                <button className="chat-icon-button" onClick={() => setExpanded(false)} aria-label="Close Ask">
+                  <X size={15} />
+                </button>
+              ) : null}
             </div>
 
             <div className="meeting-chat-messages" ref={scrollRef}>
@@ -140,13 +167,12 @@ export function MeetingChat({ meeting, project }: MeetingChatProps) {
               ) : chatMessages.length === 0 ? (
                 <div className="chat-empty">
                   <Sparkles size={18} />
-                  <strong>Ask about this {scopeType === "project" ? "project" : "recording"}</strong>
+                  <strong>Ask about this recording</strong>
                   <span>Try “What was decided?” or “List the follow-up work.”</span>
                 </div>
               ) : (
                 chatMessages.map((message) => (
                   <article className={`chat-message ${message.role}`} key={message.id}>
-                    <div className="chat-message-label">{message.role === "user" ? "You" : "Listen"}</div>
                     {editingId === message.id ? (
                       <div className="chat-edit-box">
                         <textarea
@@ -198,7 +224,7 @@ export function MeetingChat({ meeting, project }: MeetingChatProps) {
       </AnimatePresence>
 
       <div className="meeting-chat-composer">
-        {!expanded ? (
+        {!panelVisible ? (
           <button className="chat-expand-button" onClick={() => setExpanded(true)} aria-label="Open conversation">
             <ChevronUp size={16} />
           </button>
@@ -211,7 +237,7 @@ export function MeetingChat({ meeting, project }: MeetingChatProps) {
           value={draft}
           disabled={chatBusy}
           placeholder={settings.apiKeyConfigured
-            ? `Ask about this ${scopeType === "project" ? "project" : "meeting"}…`
+            ? "Ask about this meeting…"
             : "Add a text model API key in Settings…"}
           onFocus={() => setExpanded(true)}
           onChange={(event) => setDraft(event.target.value)}
@@ -249,4 +275,26 @@ function resizeTextarea(textarea: HTMLTextAreaElement | null): void {
   if (!textarea) return;
   textarea.style.height = "auto";
   textarea.style.height = `${Math.min(textarea.scrollHeight, 96)}px`;
+}
+
+function readPanelHeight(): number {
+  try {
+    const stored = Number(window.localStorage.getItem("listen.askPanelHeight"));
+    if (Number.isFinite(stored) && stored >= 220) return stored;
+  } catch { /* Optional preference. */ }
+  return DEFAULT_PANEL_HEIGHT;
+}
+
+function useWideChatLayout(): boolean {
+  const [wide, setWide] = useState(() => window.matchMedia("(min-width: 1450px)").matches);
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1450px)");
+    const update = (event: MediaQueryListEvent): void => setWide(event.matches);
+    setWide(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return wide;
 }

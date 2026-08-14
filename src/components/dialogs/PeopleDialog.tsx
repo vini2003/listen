@@ -1,4 +1,4 @@
-import { Camera, Pencil, Plus, Trash2, UserRound } from "lucide-react";
+import { ImageUp, Pencil, Plus, Save, Trash2, UserRound } from "lucide-react";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import type { Person, PersonDraft } from "../../domain/models";
 import { useWorkspace } from "../../store/workspace";
@@ -56,6 +56,7 @@ export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
     if (!file) return;
     const dataUrl = await fileToDataUrl(file);
     setDraft((current) => ({ ...current, photoDataUrl: dataUrl }));
+    event.target.value = "";
   }
 
   return (
@@ -79,13 +80,26 @@ export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
           {editing ? (
             <form className="person-form" onSubmit={(event) => void submit(event)}>
               <div className="person-photo-editor">
-                <Avatar person={{ ...editing === "new" ? { id: "", color: "#777", createdAt: "" } : editing, ...draft } as Person} size="large" />
-                <label className="upload-button"><Camera size={15} /> Choose photo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void readFile(event)} /></label>
+                <div className="person-photo-control">
+                  <label className="person-photo-upload" aria-label={draft.photoDataUrl ? "Change photo" : "Add photo"}>
+                    <Avatar person={{ ...editing === "new" ? { id: "", color: "#777", createdAt: "" } : editing, ...draft } as Person} size="large" />
+                    <span className="person-photo-overlay"><ImageUp size={19} /></span>
+                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void readFile(event)} />
+                  </label>
+                  {draft.photoDataUrl ? (
+                    <button
+                      className="person-photo-remove"
+                      type="button"
+                      aria-label="Remove photo"
+                      onClick={() => setDraft((current) => ({ ...current, photoDataUrl: null }))}
+                    ><Trash2 size={12} /></button>
+                  ) : null}
+                </div>
               </div>
               <label><span>Name</span><input autoFocus value={draft.fullName} onChange={(event) => setDraft({ ...draft, fullName: event.target.value })} placeholder="Ben" /></label>
               <div className="person-form-actions">
                 {editing !== "new" ? <button type="button" className="danger-text-button" onClick={() => { void deletePerson(editing.id).then((deleted) => { if (deleted) setEditing(null); }); }}><Trash2 size={15} /> Delete</button> : <span />}
-                <div><button type="button" className="secondary-button" onClick={() => setEditing(null)}>Cancel</button><button className="primary-button" disabled={!draft.fullName.trim() || busy}>Save person</button></div>
+                <div><button type="button" className="secondary-button" onClick={() => setEditing(null)}>Cancel</button><button className="primary-button" disabled={!draft.fullName.trim() || busy}><Save size={15} /> Save</button></div>
               </div>
             </form>
           ) : (
