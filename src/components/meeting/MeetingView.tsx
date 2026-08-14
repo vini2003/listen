@@ -40,55 +40,55 @@ export function MeetingView({ meeting, onOpenPeople }: MeetingViewProps) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
     >
-      <header className="meeting-header">
-        <div className="meeting-actions" ref={menuRef}>
-          <button className="icon-button" onClick={() => setMenuOpen((open) => !open)} aria-label="Meeting options">
-            <MoreHorizontal size={19} />
-          </button>
-          <AnimatePresence>
-            {menuOpen ? (
-              <motion.div className="meeting-menu" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}>
-                <button onClick={() => { setEditing(true); setMenuOpen(false); }}><Pencil size={15} /> Rename</button>
-                <button
-                  disabled={busy || meeting.status === "recording" || meeting.status === "processing"}
-                  onClick={() => {
-                    setMenuOpen(false);
-                    document.querySelector<HTMLButtonElement>(`[data-record-meeting="${meeting.id}"]`)?.click();
-                  }}
-                ><Mic size={15} /> Record</button>
-                <div className="menu-divider" />
-                <button className="danger-menu-item" onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={15} /> Delete</button>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-        </div>
-
-        <div className="meeting-title-row">
-          {editing ? (
-            <input
-              className="meeting-title-input"
-              autoFocus
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              onBlur={() => void commitTitle()}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void commitTitle();
-                if (event.key === "Escape") { setTitle(meeting.title); setEditing(false); }
-              }}
-            />
-          ) : (
-            <button className="meeting-title-button" onClick={() => setEditing(true)}>
-              <h1>{meeting.title}</h1>
-            </button>
-          )}
-        </div>
-        <div className="meeting-subtitle">
-          <span>{meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { weekday: "long", hour: "numeric", minute: "2-digit" }) : "Not recorded yet"}</span>
-          {meeting.durationMs > 0 ? <><span className="meta-separator" /> <span>{formatDuration(meeting.durationMs)}</span></> : null}
-        </div>
-      </header>
-
       <section className="transcript-container">
+        <header className="meeting-header">
+          <div className="meeting-actions" ref={menuRef}>
+            <button className="icon-button" onClick={() => setMenuOpen((open) => !open)} aria-label="Meeting options">
+              <MoreHorizontal size={19} />
+            </button>
+            <AnimatePresence>
+              {menuOpen ? (
+                <motion.div className="meeting-menu" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}>
+                  <button onClick={() => { setEditing(true); setMenuOpen(false); }}><Pencil size={15} /> Rename</button>
+                  <button
+                    disabled={busy || meeting.status === "recording" || meeting.status === "processing"}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      document.querySelector<HTMLButtonElement>(`[data-record-meeting="${meeting.id}"]`)?.click();
+                    }}
+                  ><Mic size={15} /> Record</button>
+                  <div className="menu-divider" />
+                  <button className="danger-menu-item" onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={15} /> Delete</button>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </div>
+
+          <div className="meeting-title-row">
+            {editing ? (
+              <input
+                className="meeting-title-input"
+                autoFocus
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                onBlur={() => void commitTitle()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void commitTitle();
+                  if (event.key === "Escape") { setTitle(meeting.title); setEditing(false); }
+                }}
+              />
+            ) : (
+              <button className="meeting-title-button" onClick={() => setEditing(true)}>
+                <h1>{meeting.title}</h1>
+              </button>
+            )}
+          </div>
+          <div className="meeting-subtitle">
+            <span>{meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { weekday: "long", hour: "numeric", minute: "2-digit" }) : "Not recorded yet"}</span>
+            {meeting.durationMs > 0 ? <><span className="meta-separator" /> <span>{formatDuration(meeting.durationMs)}</span></> : null}
+          </div>
+        </header>
+
         <Transcript meeting={meeting} onOpenPeople={onOpenPeople} />
       </section>
 
