@@ -74,6 +74,7 @@ export function Sidebar({
   const [deleteCandidate, setDeleteCandidate] = useState<Meeting | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const dragPreviewRef = useRef<HTMLDivElement | null>(null);
+  const projectClickTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     setExpanded((current) => {
@@ -84,6 +85,10 @@ export function Sidebar({
   }, [projects]);
 
   useEffect(() => setOrderedProjects(projects), [projects]);
+
+  useEffect(() => () => {
+    if (projectClickTimerRef.current !== null) window.clearTimeout(projectClickTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -119,6 +124,20 @@ export function Sidebar({
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
+  }
+
+  function scheduleProjectToggle(id: string): void {
+    if (projectClickTimerRef.current !== null) window.clearTimeout(projectClickTimerRef.current);
+    projectClickTimerRef.current = window.setTimeout(() => {
+      projectClickTimerRef.current = null;
+      toggleProject(id);
+    }, 220);
+  }
+
+  function cancelScheduledProjectToggle(): void {
+    if (projectClickTimerRef.current === null) return;
+    window.clearTimeout(projectClickTimerRef.current);
+    projectClickTimerRef.current = null;
   }
 
   function beginMeetingDrag(event: DragEvent, meeting: Meeting): void {
@@ -324,10 +343,11 @@ export function Sidebar({
                     ) : (
                       <button
                         className="row-main"
-                        onClick={() => toggleProject(project.id)}
+                        onClick={() => scheduleProjectToggle(project.id)}
                         onDoubleClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
+                          cancelScheduledProjectToggle();
                           beginProjectRename(project);
                         }}
                       >
