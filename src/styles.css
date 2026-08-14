@@ -123,11 +123,11 @@ button:focus-visible, input:focus-visible { box-shadow: 0 0 0 2px var(--surface-
 .row-action { display: none; place-items: center; width: 25px; height: 25px; padding: 0; background: transparent; color: var(--text-soft); border-radius: 5px; }
 .project-row:hover .row-action { display: grid; }
 .project-actions-sidebar:has(.project-menu) .row-action { display: grid; background: var(--hover); color: var(--text); }
-.meeting-list { display: flex; overflow: hidden; flex-direction: column; gap: 0; margin: 1px 0 4px 20px; padding: 3px 0; }
+.meeting-list { display: flex; flex-direction: column; gap: 0; margin: 1px 0 4px 20px; padding: 3px 0; }
 .meeting-row-shell { position: relative; min-width: 0; border-radius: 7px; transition: opacity 120ms ease, transform 120ms ease; }
 .meeting-row-shell.dragging { opacity: .38; transform: scale(.985); }
 .meeting-drag-preview { position: fixed; z-index: 9999; left: -1000px; top: -1000px; max-width: 260px; overflow: hidden; padding: 9px 12px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 9px; box-shadow: var(--shadow-lg); font-size: 12.5px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
-.meeting-row-shell form { margin: 0 4px; }
+.meeting-row-shell form { margin: 0; }
 .meeting-row { padding: 4px 8px 4px 11px; text-align: left; }
 .meeting-row[draggable="true"], .meeting-row[draggable="true"]:active { cursor: default; }
 .meeting-row-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }

@@ -36,6 +36,8 @@ interface SidebarProps {
 
 type DropSpot = MeetingDropSpot;
 
+const PROJECT_TOGGLE_DELAY_MS = 140;
+
 interface ContextMenuState {
   meetingId: string;
   x: number;
@@ -131,7 +133,7 @@ export function Sidebar({
     projectClickTimerRef.current = window.setTimeout(() => {
       projectClickTimerRef.current = null;
       toggleProject(id);
-    }, 220);
+    }, PROJECT_TOGGLE_DELAY_MS);
   }
 
   function cancelScheduledProjectToggle(): void {
@@ -358,19 +360,11 @@ export function Sidebar({
                     <ProjectActions project={project} placement="sidebar" />
                   </div>
 
-                  <AnimatePresence initial={false}>
-                    {isExpanded ? (
-                      <motion.div
-                        className="meeting-list"
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: "auto", opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.16, ease: [0.2, 0.8, 0.2, 1] }}
-                      >
-                        {renderMeetingList(project.id, projectMeetings)}
-                      </motion.div>
-                    ) : null}
-                  </AnimatePresence>
+                  {isExpanded ? (
+                    <div className="meeting-list">
+                      {renderMeetingList(project.id, projectMeetings)}
+                    </div>
+                  ) : null}
                 </div>
               </Reorder.Item>
             );
