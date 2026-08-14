@@ -21,7 +21,7 @@ import {
   type FormEvent,
   type MouseEvent,
 } from "react";
-import type { Meeting } from "../../domain/models";
+import type { Meeting, Project } from "../../domain/models";
 import { meaningfulMeetingDrop, type MeetingDropSpot } from "../../lib/meetingDrop";
 import { useWorkspace } from "../../store/workspace";
 import { ProjectActions } from "../project/ProjectActions";
@@ -56,6 +56,7 @@ export function Sidebar({
     selectMeeting,
     reorderMeeting,
     reorderProjects,
+    renameProject,
     renameMeeting,
     deleteMeeting,
     busy,
@@ -66,6 +67,8 @@ export function Sidebar({
   const [dropSpot, setDropSpot] = useState<DropSpot | null>(null);
   const [hoveredCollectionKey, setHoveredCollectionKey] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [projectRenameValue, setProjectRenameValue] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deleteCandidate, setDeleteCandidate] = useState<Meeting | null>(null);
@@ -188,6 +191,21 @@ export function Sidebar({
     setRenameValue(meeting.title);
   }
 
+  function beginProjectRename(project: Project): void {
+    setRenamingProjectId(project.id);
+    setProjectRenameValue(project.name);
+  }
+
+  async function commitProjectRename(event?: FormEvent): Promise<void> {
+    event?.preventDefault();
+    const project = projects.find((candidate) => candidate.id === renamingProjectId);
+    const nextName = projectRenameValue.trim();
+    if (project && nextName && nextName !== project.name) {
+      if (!await renameProject(project.id, nextName)) return;
+    }
+    setRenamingProjectId(null);
+  }
+
   async function commitRename(event?: FormEvent): Promise<void> {
     event?.preventDefault();
     const meeting = meetings.find((candidate) => candidate.id === renamingId);
@@ -218,6 +236,7 @@ export function Sidebar({
               onCommitRename={commitRename}
               onCancelRename={() => setRenamingId(null)}
               onSelect={() => selectMeeting(meeting.id)}
+              onBeginRename={() => beginRename(meeting)}
               onContextMenu={(event) => openContextMenu(event, meeting)}
               onDragStart={(event) => beginMeetingDrag(event, meeting)}
               onDragEnd={finishMeetingDrag}
@@ -283,10 +302,39 @@ export function Sidebar({
                     <button className="disclosure" onClick={() => toggleProject(project.id)} aria-label={`${isExpanded ? "Collapse" : "Expand"} ${project.name}`}>
                       {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     </button>
-                    <button className="row-main" onClick={() => toggleProject(project.id)}>
-                      <Folder size={16} />
-                      <span>{project.name}</span>
-                    </button>
+                    {renamingProjectId === project.id ? (
+                      <form
+                        className="project-inline-rename"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onSubmit={(event) => void commitProjectRename(event)}
+                      >
+                        <Folder size={16} />
+                        <input
+                          autoFocus
+                          value={projectRenameValue}
+                          onChange={(event) => setProjectRenameValue(event.target.value)}
+                          onFocus={(event) => event.currentTarget.select()}
+                          onBlur={() => void commitProjectRename()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") setRenamingProjectId(null);
+                          }}
+                          aria-label={`Rename ${project.name}`}
+                        />
+                      </form>
+                    ) : (
+                      <button
+                        className="row-main"
+                        onClick={() => toggleProject(project.id)}
+                        onDoubleClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          beginProjectRename(project);
+                        }}
+                      >
+                        <Folder size={16} />
+                        <span>{project.name}</span>
+                      </button>
+                    )}
                     <ProjectActions project={project} placement="sidebar" />
                   </div>
 
@@ -417,6 +465,7 @@ interface MeetingRowProps {
   onCommitRename: (event?: FormEvent) => Promise<void>;
   onCancelRename: () => void;
   onSelect: () => void;
+  onBeginRename: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onDragStart: (event: DragEvent) => void;
   onDragEnd: () => void;
@@ -434,6 +483,7 @@ function MeetingRow({
   onCommitRename,
   onCancelRename,
   onSelect,
+  onBeginRename,
   onContextMenu,
   onDragStart,
   onDragEnd,
@@ -452,7 +502,9 @@ function MeetingRow({
             autoFocus
             value={renameValue}
             onChange={(event) => onRenameValueChange(event.target.value)}
+            onFocus={(event) => event.currentTarget.select()}
             onBlur={() => void onCommitRename()}
+            aria-label={`Rename ${meeting.title}`}
             onKeyDown={(event) => {
               if (event.key === "Escape") onCancelRename();
             }}
@@ -463,6 +515,11 @@ function MeetingRow({
           className={`sidebar-row meeting-row ${selected ? "selected" : ""}`}
           draggable
           onClick={onSelect}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onBeginRename();
+          }}
           onContextMenu={onContextMenu}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
