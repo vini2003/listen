@@ -333,6 +333,7 @@ export function Sidebar({
         <Reorder.Group axis="y" values={orderedProjects} onReorder={setOrderedProjects} className="project-list" as="div">
           {orderedProjects.map((project) => {
             const projectMeetings = meetingsByProject.get(project.id) ?? [];
+            const hasMeetings = projectMeetings.length > 0;
             const isExpanded = expanded.has(project.id);
             return (
               <Reorder.Item
@@ -361,9 +362,11 @@ export function Sidebar({
                     }}
                     onDrop={(event) => void commitDrop(event, { projectId: project.id, index: projectMeetings.length })}
                   >
-                    <button className="disclosure" onClick={() => toggleProject(project.id)} aria-label={`${isExpanded ? "Collapse" : "Expand"} ${project.name}`}>
-                      {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    </button>
+                    {hasMeetings ? (
+                      <button className="disclosure" onClick={() => toggleProject(project.id)} aria-label={`${isExpanded ? "Collapse" : "Expand"} ${project.name}`}>
+                        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      </button>
+                    ) : <span className="disclosure disclosure-placeholder" aria-hidden="true" />}
                     {renamingProjectId === project.id ? (
                       <form
                         className="project-inline-rename"
@@ -386,7 +389,9 @@ export function Sidebar({
                     ) : (
                       <button
                         className="row-main"
-                        onClick={() => scheduleProjectToggle(project.id)}
+                        onClick={() => {
+                          if (hasMeetings) scheduleProjectToggle(project.id);
+                        }}
                         onDoubleClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
