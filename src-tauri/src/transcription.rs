@@ -10,15 +10,32 @@ use uuid::Uuid;
 use crate::{
     credentials,
     database::Database,
-    domain::TranscriptSegment,
+    domain::{AppSettings, Meeting, TranscriptSegment},
     error::{AppError, AppResult},
-    pyannote::{self, IdentificationSpan, KnownVoiceprint, PyannoteClient, TranscriptionTurn},
+    pyannote::{
+        self, IdentificationSpan, KnownVoiceprint, PyannoteClient, TranscriptionTurn,
+        VoiceprintMatch,
+    },
     speech_audio,
     transcript_cleanup::{self, CleanupContext},
     voice_reference,
 };
 
 const MAX_PYANNOTE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_IDENTITY_CONFIDENCE: f64 = 72.0;
+const MIN_IDENTITY_MARGIN: f64 = 12.0;
+const MIN_CLUSTER_ALIGNMENT: f64 = 0.60;
+const MIN_LOCAL_MICROPHONE_RMS: f64 = 140.0;
+const MIN_LOCAL_MICROPHONE_DOMINANCE: f64 = 2.5;
+
+#[derive(Debug, Clone)]
+pub struct IdentityDecisionReport {
+    pub speaker: String,
+    pub person_id: Option<String>,
+    pub confidence: Option<f64>,
+    pub margin: Option<f64>,
+    pub reason: String,
+}
 
 pub struct TranscriptionReport {
     pub cleanup_error: Option<String>,
@@ -28,6 +45,8 @@ pub struct TranscriptionReport {
     pub minimum_speakers: Option<u8>,
     pub detected_speakers: Vec<String>,
     pub transcribed_speakers: Vec<String>,
+    pub identity_candidates: usize,
+    pub identity_decisions: Vec<IdentityDecisionReport>,
 }
 
 pub async fn transcribe_meeting(
@@ -83,15 +102,25 @@ pub async fn transcribe_meeting(
     let media_url = media_url?;
 
     let people = database.people()?;
-    let known_people = people
-        .iter()
-        .filter_map(|person| {
-            voice_reference::known_voiceprint(person.reference_audio_data_url.as_deref()).map(
-                |voiceprint| KnownVoiceprint {
-                    label: person.id.clone(),
-                    voiceprint,
-                },
-            )
+    let settings = database.settings()?;
+    let candidate_ids = identification_candidate_ids(database, &meeting, &settings)?;
+    let known_people = database
+        .voice_profiles()?
+        .into_iter()
+        .filter(|profile| {
+            candidate_ids.contains(&profile.person_id)
+                && profile.status == "ready"
+                && profile.consent_confirmed_at.is_some()
+        })
+        .filter_map(|profile| {
+            let voiceprint = credentials::voiceprint(&profile.person_id)
+                .ok()
+                .flatten()
+                .or(profile.voiceprint)?;
+            Some(KnownVoiceprint {
+                label: profile.person_id,
+                voiceprint,
+            })
         })
         .take(50)
         .collect::<Vec<_>>();
@@ -145,9 +174,16 @@ pub async fn transcribe_meeting(
         .iter()
         .map(|person| person.id.clone())
         .collect::<HashSet<_>>();
-    let identification_spans = identification
+    let (cluster_identities, mut identity_decisions) = identification
         .as_ref()
-        .map(|output| output.identification.as_slice())
+        .map(|output| {
+            reconcile_identity_clusters(
+                &transcription.turn_level_transcription,
+                &output.identification,
+                &output.voiceprints,
+                &valid_person_ids,
+            )
+        })
         .unwrap_or_default();
     let mut segments = transcription
         .turn_level_transcription
@@ -159,14 +195,40 @@ pub async fn transcribe_meeting(
             }
             let start_ms = seconds_to_ms(turn.start);
             let end_ms = seconds_to_ms(turn.end).max(start_ms + 1);
-            let person_id = person_from_identification(turn, identification_spans)
-                .filter(|person_id| valid_person_ids.contains(person_id))
-                .or_else(|| person_from_overlap(&existing_segments, start_ms, end_ms));
+            let manual_person = person_from_manual_overlap(&existing_segments, start_ms, end_ms);
+            let local_person = local_microphone_person(
+                &audio_directory,
+                &settings,
+                &active_sources,
+                start_ms,
+                end_ms,
+            );
+            let voice_identity = cluster_identities.get(&turn.speaker);
+            let (person_id, identity_source, identity_confidence) =
+                if let Some(person_id) = manual_person {
+                    (Some(person_id), Some("manual".to_string()), None)
+                } else if let Some(person_id) = local_person {
+                    (
+                        Some(person_id),
+                        Some("local_microphone".to_string()),
+                        Some(100.0),
+                    )
+                } else if let Some(identity) = voice_identity {
+                    (
+                        Some(identity.person_id.clone()),
+                        Some("voiceprint".to_string()),
+                        Some(identity.confidence),
+                    )
+                } else {
+                    (None, None, None)
+                };
             Some(TranscriptSegment {
                 id: Uuid::new_v4().to_string(),
                 meeting_id: meeting_id.to_string(),
                 speaker_label: format!("precision:{}", turn.speaker),
                 person_id,
+                identity_source,
+                identity_confidence,
                 start_ms,
                 end_ms,
                 text: text.to_string(),
@@ -174,6 +236,14 @@ pub async fn transcribe_meeting(
         })
         .collect::<Vec<_>>();
     segments.sort_by_key(|segment| segment.start_ms);
+    for decision in &mut identity_decisions {
+        if segments.iter().any(|segment| {
+            segment.speaker_label == format!("precision:{}", decision.speaker)
+                && segment.identity_source.as_deref() == Some("microphone")
+        }) {
+            decision.reason = "local_microphone".to_string();
+        }
+    }
     database.replace_segments(meeting_id, segments.clone())?;
 
     let project_name = meeting.project_id.as_ref().and_then(|project_id| {
@@ -214,6 +284,8 @@ pub async fn transcribe_meeting(
         minimum_speakers,
         detected_speakers,
         transcribed_speakers,
+        identity_candidates: known_people.len(),
+        identity_decisions,
     })
 }
 
@@ -239,35 +311,164 @@ async fn optional_cleanup(
     }
 }
 
-fn person_from_identification(
-    turn: &TranscriptionTurn,
-    identification: &[IdentificationSpan],
-) -> Option<String> {
-    let turn_start_ms = seconds_to_ms(turn.start);
-    let turn_end_ms = seconds_to_ms(turn.end);
-    let duration_ms = (turn_end_ms - turn_start_ms).max(1);
-    let mut overlap_by_person = HashMap::<&str, i64>::new();
-    for span in identification {
-        let Some(person_id) = span.r#match.as_deref() else {
-            continue;
-        };
-        let overlap = overlap_ms(
-            turn_start_ms,
-            turn_end_ms,
-            seconds_to_ms(span.start),
-            seconds_to_ms(span.end),
-        );
-        if overlap > 0 {
-            *overlap_by_person.entry(person_id).or_default() += overlap;
-        }
-    }
-    let (person_id, overlap_ms) = overlap_by_person
-        .into_iter()
-        .max_by_key(|(_, overlap_ms)| *overlap_ms)?;
-    (overlap_ms * 2 >= duration_ms).then(|| person_id.to_string())
+#[derive(Debug, Clone)]
+struct AcceptedIdentity {
+    person_id: String,
+    confidence: f64,
 }
 
-fn person_from_overlap(
+fn identification_candidate_ids(
+    database: &Database,
+    meeting: &Meeting,
+    settings: &AppSettings,
+) -> AppResult<HashSet<String>> {
+    if !settings.speaker_identification_enabled || settings.biometric_consent_accepted_at.is_none()
+    {
+        return Ok(HashSet::new());
+    }
+
+    let mut candidates = HashSet::new();
+    if let Some(person_id) = settings.local_speaker_person_id.as_ref() {
+        candidates.insert(person_id.clone());
+    }
+
+    let related_meeting_ids = database
+        .meetings()?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.id == meeting.id
+                || meeting.project_id.is_some() && candidate.project_id == meeting.project_id
+        })
+        .map(|candidate| candidate.id)
+        .collect::<HashSet<_>>();
+    for segment in database.segments()? {
+        if related_meeting_ids.contains(&segment.meeting_id) {
+            if let Some(person_id) = segment.person_id {
+                candidates.insert(person_id);
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn reconcile_identity_clusters(
+    transcription: &[TranscriptionTurn],
+    identification: &[IdentificationSpan],
+    voiceprints: &[VoiceprintMatch],
+    valid_person_ids: &HashSet<String>,
+) -> (
+    HashMap<String, AcceptedIdentity>,
+    Vec<IdentityDecisionReport>,
+) {
+    let mut accepted_by_identification_cluster = HashMap::new();
+    let mut score_by_identification_cluster = HashMap::new();
+
+    for result in voiceprints {
+        let mut scores = result
+            .confidence
+            .iter()
+            .filter(|(person_id, _)| valid_person_ids.contains(*person_id))
+            .map(|(person_id, score)| (person_id.as_str(), *score))
+            .collect::<Vec<_>>();
+        scores.sort_by(|left, right| right.1.total_cmp(&left.1));
+        let Some((best_person, best_score)) = scores.first().copied() else {
+            continue;
+        };
+        let second_score = scores.get(1).map(|(_, score)| *score).unwrap_or(0.0);
+        let margin = best_score - second_score;
+        score_by_identification_cluster.insert(
+            result.speaker.clone(),
+            (best_person.to_string(), best_score, margin),
+        );
+        if result.r#match.as_deref() == Some(best_person)
+            && best_score >= MIN_IDENTITY_CONFIDENCE
+            && margin >= MIN_IDENTITY_MARGIN
+        {
+            accepted_by_identification_cluster.insert(
+                result.speaker.clone(),
+                AcceptedIdentity {
+                    person_id: best_person.to_string(),
+                    confidence: best_score,
+                },
+            );
+        }
+    }
+
+    let mut identities = HashMap::new();
+    let mut reports = Vec::new();
+    let transcription_speakers = transcription
+        .iter()
+        .map(|turn| turn.speaker.as_str())
+        .collect::<HashSet<_>>();
+    for speaker in transcription_speakers {
+        let speaker_turns = transcription.iter().filter(|turn| turn.speaker == speaker);
+        let mut total_ms = 0i64;
+        let mut overlap_by_cluster = HashMap::<&str, i64>::new();
+        for turn in speaker_turns {
+            let start_ms = seconds_to_ms(turn.start);
+            let end_ms = seconds_to_ms(turn.end);
+            total_ms += (end_ms - start_ms).max(0);
+            for span in identification {
+                let Some(cluster) = span.diarization_speaker.as_deref() else {
+                    continue;
+                };
+                let overlap = overlap_ms(
+                    start_ms,
+                    end_ms,
+                    seconds_to_ms(span.start),
+                    seconds_to_ms(span.end),
+                );
+                if overlap > 0 {
+                    *overlap_by_cluster.entry(cluster).or_default() += overlap;
+                }
+            }
+        }
+
+        let aligned = overlap_by_cluster
+            .into_iter()
+            .max_by_key(|(_, overlap)| *overlap)
+            .filter(|(_, overlap)| {
+                total_ms > 0 && *overlap as f64 / total_ms as f64 >= MIN_CLUSTER_ALIGNMENT
+            });
+        let Some((identification_cluster, _)) = aligned else {
+            reports.push(IdentityDecisionReport {
+                speaker: speaker.to_string(),
+                person_id: None,
+                confidence: None,
+                margin: None,
+                reason: "cluster_alignment_low".to_string(),
+            });
+            continue;
+        };
+        let scores = score_by_identification_cluster.get(identification_cluster);
+        if let Some(identity) = accepted_by_identification_cluster.get(identification_cluster) {
+            identities.insert(speaker.to_string(), identity.clone());
+            reports.push(IdentityDecisionReport {
+                speaker: speaker.to_string(),
+                person_id: Some(identity.person_id.clone()),
+                confidence: Some(identity.confidence),
+                margin: scores.map(|(_, _, margin)| *margin),
+                reason: "accepted".to_string(),
+            });
+        } else {
+            reports.push(IdentityDecisionReport {
+                speaker: speaker.to_string(),
+                person_id: None,
+                confidence: scores.map(|(_, score, _)| *score),
+                margin: scores.map(|(_, _, margin)| *margin),
+                reason: if scores.is_some() {
+                    "below_threshold"
+                } else {
+                    "no_candidate_score"
+                }
+                .to_string(),
+            });
+        }
+    }
+    (identities, reports)
+}
+
+fn person_from_manual_overlap(
     existing_segments: &[TranscriptSegment],
     start_ms: i64,
     end_ms: i64,
@@ -276,12 +477,47 @@ fn person_from_overlap(
     let (person_id, overlap_ms) = existing_segments
         .iter()
         .filter_map(|segment| {
+            if segment.identity_source.as_deref() != Some("manual") {
+                return None;
+            }
             let person_id = segment.person_id.as_ref()?;
             let overlap_ms = overlap_ms(start_ms, end_ms, segment.start_ms, segment.end_ms);
             (overlap_ms > 0).then_some((person_id, overlap_ms))
         })
         .max_by_key(|(_, overlap_ms)| *overlap_ms)?;
     (overlap_ms * 2 >= duration_ms).then(|| person_id.clone())
+}
+
+fn local_microphone_person(
+    audio_directory: &std::path::Path,
+    settings: &AppSettings,
+    active_sources: &[String],
+    start_ms: i64,
+    end_ms: i64,
+) -> Option<String> {
+    if !settings.prefer_local_speaker_for_microphone
+        || !settings.speaker_identification_enabled
+        || settings.biometric_consent_accepted_at.is_none()
+        || !active_sources.iter().any(|source| source == "microphone")
+    {
+        return None;
+    }
+    let person_id = settings.local_speaker_person_id.as_ref()?;
+    let microphone =
+        speech_audio::recording_source_clip(audio_directory, "microphone", start_ms, end_ms)
+            .ok()?;
+    let microphone_rms = speech_audio::rms(&microphone);
+    if microphone_rms < MIN_LOCAL_MICROPHONE_RMS {
+        return None;
+    }
+    if !active_sources.iter().any(|source| source == "system") {
+        return Some(person_id.clone());
+    }
+    let system =
+        speech_audio::recording_source_clip(audio_directory, "system", start_ms, end_ms).ok()?;
+    let system_rms = speech_audio::rms(&system);
+    (system_rms < 1.0 || microphone_rms / system_rms >= MIN_LOCAL_MICROPHONE_DOMINANCE)
+        .then(|| person_id.clone())
 }
 
 fn overlap_ms(left_start: i64, left_end: i64, right_start: i64, right_end: i64) -> i64 {
@@ -315,39 +551,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_identification_by_time_not_request_local_speaker_label() {
-        let turn = TranscriptionTurn {
+    fn maps_confident_identity_by_time_across_request_local_clusters() {
+        let turns = vec![TranscriptionTurn {
             speaker: "SPEAKER_00".to_string(),
             start: 10.0,
             end: 15.0,
             text: "Hello".to_string(),
-        };
-        let identity = IdentificationSpan {
+        }];
+        let spans = vec![IdentificationSpan {
             start: 10.2,
             end: 14.9,
+            diarization_speaker: Some("SPEAKER_17".to_string()),
+        }];
+        let matches = vec![VoiceprintMatch {
+            speaker: "SPEAKER_17".to_string(),
             r#match: Some("nestor".to_string()),
-        };
+            confidence: HashMap::from([("nestor".to_string(), 91.0), ("freddy".to_string(), 12.0)]),
+        }];
+        let valid = HashSet::from(["nestor".to_string(), "freddy".to_string()]);
 
-        assert_eq!(
-            person_from_identification(&turn, &[identity]),
-            Some("nestor".to_string())
-        );
+        let (identities, reports) = reconcile_identity_clusters(&turns, &spans, &matches, &valid);
+        assert_eq!(identities["SPEAKER_00"].person_id, "nestor");
+        assert_eq!(reports[0].reason, "accepted");
     }
 
     #[test]
-    fn does_not_force_a_weak_identity_match() {
-        let turn = TranscriptionTurn {
+    fn rejects_low_confidence_or_ambiguous_voiceprints() {
+        let turns = vec![TranscriptionTurn {
             speaker: "SPEAKER_00".to_string(),
             start: 10.0,
             end: 20.0,
             text: "Hello".to_string(),
-        };
-        let identity = IdentificationSpan {
+        }];
+        let spans = vec![IdentificationSpan {
             start: 10.0,
-            end: 12.0,
+            end: 20.0,
+            diarization_speaker: Some("SPEAKER_04".to_string()),
+        }];
+        let matches = vec![VoiceprintMatch {
+            speaker: "SPEAKER_04".to_string(),
             r#match: Some("nestor".to_string()),
+            confidence: HashMap::from([("nestor".to_string(), 76.0), ("freddy".to_string(), 70.0)]),
+        }];
+        let valid = HashSet::from(["nestor".to_string(), "freddy".to_string()]);
+
+        let (identities, reports) = reconcile_identity_clusters(&turns, &spans, &matches, &valid);
+        assert!(identities.is_empty());
+        assert_eq!(reports[0].reason, "below_threshold");
+    }
+
+    #[test]
+    fn only_preserves_explicit_manual_assignments() {
+        let manual = TranscriptSegment {
+            id: "one".to_string(),
+            meeting_id: "meeting".to_string(),
+            speaker_label: "precision:A".to_string(),
+            person_id: Some("vini".to_string()),
+            identity_source: Some("manual".to_string()),
+            identity_confidence: None,
+            start_ms: 0,
+            end_ms: 5_000,
+            text: "Hello".to_string(),
+        };
+        let automatic = TranscriptSegment {
+            id: "two".to_string(),
+            person_id: Some("freddy".to_string()),
+            identity_source: Some("voiceprint".to_string()),
+            start_ms: 5_000,
+            end_ms: 10_000,
+            ..manual.clone()
         };
 
-        assert_eq!(person_from_identification(&turn, &[identity]), None);
+        assert_eq!(
+            person_from_manual_overlap(&[manual], 0, 5_000),
+            Some("vini".to_string())
+        );
+        assert_eq!(
+            person_from_manual_overlap(&[automatic], 5_000, 10_000),
+            None
+        );
     }
 }

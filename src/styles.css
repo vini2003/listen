@@ -420,6 +420,19 @@ input:checked + .switch::after { transform: translateX(12px); }
 .voice-reference-field p { margin: 6px 0 9px; color: var(--text-faint); font-size: 10px; line-height: 1.5; }
 .person-form-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; padding-top: 17px; border-top: 1px solid var(--border); }
 .person-form-actions > div { display: flex; gap: 7px; }
+.voice-profile-card { display: flex; flex-direction: column; gap: 10px; padding: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 11px; }
+.voice-profile-heading { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: start; gap: 9px; }
+.voice-profile-heading > span:first-child { display: grid; place-items: center; width: 30px; height: 30px; color: var(--text-soft); background: var(--hover); border-radius: 8px; }
+.voice-profile-heading strong { display: block; margin-top: 1px; font-size: 12.5px; }
+.voice-profile-heading p { margin: 3px 0 0; color: var(--text-soft); font-size: 11px; line-height: 1.4; }
+.voice-profile-status { margin-top: 3px; padding: 4px 7px; color: var(--text-soft); background: var(--hover); border-radius: 999px; font-size: 9.5px; font-weight: 650; white-space: nowrap; }
+.voice-profile-status.status-ready { color: #5f8a71; background: color-mix(in srgb, #557966 13%, transparent); }
+.voice-profile-status.status-failed { color: var(--danger); background: var(--danger-soft); }
+.settings-toggle { display: flex; align-items: flex-start; gap: 8px; color: var(--text-soft); font-size: 11.5px; line-height: 1.4; cursor: pointer; }
+.settings-toggle input { flex: 0 0 auto; width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--accent); }
+.settings-toggle > span { display: flex; align-items: center; gap: 6px; }
+.voice-permission-toggle { padding-top: 10px; border-top: 1px solid var(--border); }
+.voice-profile-disabled { margin: 0; color: var(--text-faint); font-size: 11px; }
 .danger-text-button { display: flex; align-items: center; gap: 6px; padding: 7px; color: var(--danger); background: transparent; border-radius: 6px; font-size: 10px; }
 .danger-text-button:hover { background: var(--danger-soft); }
 .person-editor-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 35px; color: var(--text-faint); text-align: center; }
@@ -449,6 +462,20 @@ input:checked + .switch::after { transform: translateX(12px); }
 .compact-settings { grid-template-columns: 1fr; }
 .full-width { width: 100%; }
 .theme-select { flex: 0 0 130px; width: 130px; }
+.voice-settings-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 15px; }
+.voice-owner-hint { margin: 0; color: var(--text-soft); font-size: 11.5px; line-height: 1.45; }
+
+.privacy-notice { padding: 19px 22px 22px; }
+.privacy-point { display: grid; grid-template-columns: 30px 1fr; gap: 10px; padding: 10px 0; }
+.privacy-point > svg { margin: 2px 0 0 5px; color: var(--text-soft); }
+.privacy-point strong, .privacy-choice strong { display: block; font-size: 13px; font-weight: 650; }
+.privacy-point p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+.privacy-choice { display: grid; grid-template-columns: auto 28px 1fr; align-items: start; gap: 9px; margin-top: 9px; padding: 14px; background: var(--selected); border: 1px solid var(--border); border-radius: 11px; cursor: pointer; }
+.privacy-choice input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); }
+.privacy-choice > svg { margin-top: 1px; color: var(--text-soft); }
+.privacy-choice small { display: block; margin-top: 4px; color: var(--text-soft); font-size: 11.5px; line-height: 1.45; }
+.privacy-fine-print { margin: 13px 2px 0; color: var(--text-faint); font-size: 10.5px; line-height: 1.5; }
+.privacy-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 .toast-viewport { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; position: fixed; z-index: 700; right: 18px; bottom: 18px; width: min(390px, calc(100vw - 36px)); pointer-events: none; }
 .error-toast { display: flex; align-items: center; gap: 9px; width: fit-content; max-width: 100%; padding: 11px 11px 11px 13px; color: var(--text-soft); background: color-mix(in srgb, var(--surface-raised) 96%, transparent); border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); border-radius: 11px; box-shadow: var(--shadow-lg); font-size: 12px; line-height: 1.4; pointer-events: auto; backdrop-filter: blur(18px); }

@@ -5,6 +5,7 @@ use crate::error::{AppError, AppResult};
 const SERVICE: &str = "app.listen.desktop";
 const OPENAI_ACCOUNT: &str = "openai-api-key";
 const PYANNOTE_ACCOUNT: &str = "pyannote-api-key";
+const VOICEPRINT_PREFIX: &str = "voiceprint-";
 
 pub fn has_openai_key() -> AppResult<bool> {
     has_key(OPENAI_ACCOUNT)
@@ -28,6 +29,28 @@ pub fn openai_key() -> AppResult<String> {
 
 pub fn pyannote_key() -> AppResult<String> {
     read_key(PYANNOTE_ACCOUNT)
+}
+
+pub fn voiceprint(person_id: &str) -> AppResult<Option<String>> {
+    let account = format!("{VOICEPRINT_PREFIX}{person_id}");
+    match entry(&account)?.get_password() {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(credential_error(error)),
+    }
+}
+
+pub fn set_voiceprint(person_id: &str, value: &str) -> AppResult<()> {
+    let account = format!("{VOICEPRINT_PREFIX}{person_id}");
+    store_key(&account, value).map(|_| ())
+}
+
+pub fn delete_voiceprint(person_id: &str) -> AppResult<()> {
+    let account = format!("{VOICEPRINT_PREFIX}{person_id}");
+    match entry(&account)?.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(error) => Err(credential_error(error)),
+    }
 }
 
 fn read_key(account: &str) -> AppResult<String> {

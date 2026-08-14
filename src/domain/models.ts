@@ -27,9 +27,21 @@ export interface Person {
   fullName: string;
   nickname: string | null;
   photoDataUrl: string | null;
-  referenceAudioDataUrl: string | null;
+  voiceProfile: VoiceProfileSummary | null;
   color: string;
   createdAt: string;
+}
+
+export type VoiceProfileStatus = "consent_required" | "pending_sample" | "learning" | "ready" | "failed";
+
+export interface VoiceProfileSummary {
+  status: VoiceProfileStatus;
+  consentConfirmedAt: string | null;
+  enrollmentDurationMs: number | null;
+  enrollmentClipCount: number | null;
+  source: string | null;
+  updatedAt: string;
+  lastError: string | null;
 }
 
 export interface TranscriptSegment {
@@ -37,6 +49,8 @@ export interface TranscriptSegment {
   meetingId: string;
   speakerLabel: string;
   personId: string | null;
+  identitySource: "manual" | "voiceprint" | "local_microphone" | null;
+  identityConfidence: number | null;
   startMs: number;
   endMs: number;
   text: string;
@@ -88,6 +102,11 @@ export interface AppSettings {
   theme: "light" | "dark" | "system";
   apiKeyConfigured: boolean;
   pyannoteApiKeyConfigured: boolean;
+  privacyNoticeVersion: string | null;
+  biometricConsentAcceptedAt: string | null;
+  speakerIdentificationEnabled: boolean;
+  localSpeakerPersonId: string | null;
+  preferLocalSpeakerForMicrophone: boolean;
 }
 
 export interface WorkspaceSnapshot {
@@ -112,5 +131,4 @@ export interface PersonDraft {
   fullName: string;
   nickname: string | null;
   photoDataUrl: string | null;
-  referenceAudioDataUrl: string | null;
 }

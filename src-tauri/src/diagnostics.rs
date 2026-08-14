@@ -138,23 +138,52 @@ impl Diagnostics {
         person_id: &str,
         speaker_label: &str,
         source: &str,
-        start_ms: i64,
-        end_ms: i64,
+        duration_ms: i64,
+        clip_count: i64,
         rms: f64,
         dominance: f64,
     ) -> String {
         self.record_event(
             "voiceprint.learned",
             &format!(
-                "meeting={} person={} speaker={} source={} start_ms={} end_ms={} rms={:.1} dominance={:.2}",
+                "meeting={} person={} speaker={} source={} duration_ms={} clips={} rms={:.1} dominance={:.2}",
                 sanitize_field(meeting_id),
                 sanitize_field(person_id),
                 sanitize_field(speaker_label),
                 sanitize_field(source),
-                start_ms,
-                end_ms,
+                duration_ms,
+                clip_count,
                 rms,
                 dominance
+            ),
+        )
+    }
+
+    pub fn record_identity_decision(
+        &self,
+        meeting_id: &str,
+        speaker: &str,
+        person_id: Option<&str>,
+        confidence: Option<f64>,
+        margin: Option<f64>,
+        reason: &str,
+        candidate_count: usize,
+    ) -> String {
+        self.record_event(
+            "voice_identity.decision",
+            &format!(
+                "meeting={} speaker={} person={} confidence={} margin={} reason={} candidates={}",
+                sanitize_field(meeting_id),
+                sanitize_field(speaker),
+                sanitize_field(person_id.unwrap_or("unknown")),
+                confidence
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "none".to_string()),
+                margin
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "none".to_string()),
+                sanitize_field(reason),
+                candidate_count,
             ),
         )
     }

@@ -38,6 +38,10 @@ export interface DesktopService {
   updatePerson(id: string, draft: PersonDraft): Promise<Person>;
   deletePerson(id: string): Promise<void>;
   assignSpeaker(meetingId: string, speakerLabel: string, personId: string | null): Promise<void>;
+  acknowledgePrivacyNotice(enableVoiceIdentification: boolean): Promise<AppSettings>;
+  setPersonVoiceConsent(personId: string, confirmed: boolean): Promise<Person>;
+  withdrawBiometricConsent(): Promise<AppSettings>;
+  enrollVoiceProfile(meetingId: string, speakerLabel: string, personId: string): Promise<Person>;
   updateSettings(settings: AppSettings): Promise<AppSettings>;
   setApiKey(apiKey: string): Promise<boolean>;
   setPyannoteApiKey(apiKey: string): Promise<boolean>;
@@ -71,6 +75,13 @@ const tauriService: DesktopService = {
   deletePerson: (id) => invoke("delete_person", { id }),
   assignSpeaker: (meetingId, speakerLabel, personId) =>
     invoke("assign_speaker", { meetingId, speakerLabel, personId }),
+  acknowledgePrivacyNotice: (enableVoiceIdentification) =>
+    invoke("acknowledge_privacy_notice", { enableVoiceIdentification }),
+  setPersonVoiceConsent: (personId, confirmed) =>
+    invoke("set_person_voice_consent", { personId, confirmed }),
+  withdrawBiometricConsent: () => invoke("withdraw_biometric_consent"),
+  enrollVoiceProfile: (meetingId, speakerLabel, personId) =>
+    invoke("enroll_voice_profile", { meetingId, speakerLabel, personId }),
   updateSettings: (settings) => invoke("update_settings", { settings }),
   setApiKey: (apiKey) => invoke("set_api_key", { apiKey }),
   setPyannoteApiKey: (apiKey) => invoke("set_pyannote_api_key", { apiKey }),
@@ -199,6 +210,7 @@ function createBrowserPreviewService(): DesktopService {
       const person: Person = {
         id: crypto.randomUUID(),
         ...draft,
+        voiceProfile: null,
         color: personColors[snapshot.people.length % personColors.length],
         createdAt: new Date().toISOString(),
       };
@@ -227,6 +239,51 @@ function createBrowserPreviewService(): DesktopService {
           : segment,
       );
       persist();
+    },
+    async acknowledgePrivacyNotice(enableVoiceIdentification) {
+      snapshot.settings.privacyNoticeVersion = "2026-08-14";
+      snapshot.settings.speakerIdentificationEnabled = enableVoiceIdentification;
+      snapshot.settings.biometricConsentAcceptedAt = enableVoiceIdentification ? new Date().toISOString() : null;
+      persist();
+      return snapshot.settings;
+    },
+    async setPersonVoiceConsent(personId, confirmed) {
+      const person = snapshot.people.find((candidate) => candidate.id === personId);
+      if (!person) throw new Error("Person not found");
+      person.voiceProfile = confirmed ? {
+        status: "pending_sample",
+        consentConfirmedAt: new Date().toISOString(),
+        enrollmentDurationMs: null,
+        enrollmentClipCount: null,
+        source: null,
+        updatedAt: new Date().toISOString(),
+        lastError: null,
+      } : null;
+      persist();
+      return person;
+    },
+    async withdrawBiometricConsent() {
+      snapshot.people.forEach((person) => { person.voiceProfile = null; });
+      snapshot.settings.speakerIdentificationEnabled = false;
+      snapshot.settings.biometricConsentAcceptedAt = null;
+      snapshot.settings.localSpeakerPersonId = null;
+      persist();
+      return snapshot.settings;
+    },
+    async enrollVoiceProfile(_meetingId, _speakerLabel, personId) {
+      const person = snapshot.people.find((candidate) => candidate.id === personId);
+      if (!person?.voiceProfile?.consentConfirmedAt) throw new Error("Confirm permission before creating this voice profile");
+      person.voiceProfile = {
+        ...person.voiceProfile,
+        status: "ready",
+        enrollmentDurationMs: 12_000,
+        enrollmentClipCount: 2,
+        source: "microphone",
+        updatedAt: new Date().toISOString(),
+        lastError: null,
+      };
+      persist();
+      return person;
     },
     async updateSettings(settings) {
       snapshot.settings = settings;
@@ -372,6 +429,19 @@ function readPreviewState(): WorkspaceSnapshot {
   if (saved) {
     const snapshot = JSON.parse(saved) as WorkspaceSnapshot;
     snapshot.settings.pyannoteApiKeyConfigured ??= false;
+    snapshot.settings.privacyNoticeVersion ??= null;
+    snapshot.settings.biometricConsentAcceptedAt ??= null;
+    snapshot.settings.speakerIdentificationEnabled ??= false;
+    snapshot.settings.localSpeakerPersonId ??= null;
+    snapshot.settings.preferLocalSpeakerForMicrophone ??= true;
+    snapshot.people.forEach((person) => {
+      person.voiceProfile ??= null;
+      delete (person as Person & { referenceAudioDataUrl?: string | null }).referenceAudioDataUrl;
+    });
+    snapshot.segments.forEach((segment) => {
+      segment.identitySource ??= segment.personId ? "manual" : null;
+      segment.identityConfidence ??= null;
+    });
     snapshot.meetings.forEach((meeting, index) => (meeting.position ??= index));
     snapshot.devices = snapshot.devices.map((device) => device.kind === "system"
       ? {
@@ -424,7 +494,7 @@ function readPreviewState(): WorkspaceSnapshot {
         fullName: "Ben Carter",
         nickname: "Ben",
         photoDataUrl: null,
-        referenceAudioDataUrl: null,
+        voiceProfile: null,
         color: personColors[0],
         createdAt: now.toISOString(),
       },
@@ -433,7 +503,7 @@ function readPreviewState(): WorkspaceSnapshot {
         fullName: "Ethan Brooks",
         nickname: "Ethan",
         photoDataUrl: null,
-        referenceAudioDataUrl: null,
+        voiceProfile: null,
         color: personColors[1],
         createdAt: now.toISOString(),
       },
@@ -444,6 +514,8 @@ function readPreviewState(): WorkspaceSnapshot {
         meetingId,
         speakerLabel: "A",
         personId: benId,
+        identitySource: "manual",
+        identityConfidence: null,
         startMs: 12_000,
         endMs: 31_000,
         text: "The movement is finally feeling responsive. I think the next pass should focus on how the camera settles after a sprint.",
@@ -453,6 +525,8 @@ function readPreviewState(): WorkspaceSnapshot {
         meetingId,
         speakerLabel: "B",
         personId: ethanId,
+        identitySource: "manual",
+        identityConfidence: null,
         startMs: 33_000,
         endMs: 52_000,
         text: "Agreed. The acceleration curve feels right now, but the camera still arrives half a beat after the player does.",
@@ -462,6 +536,8 @@ function readPreviewState(): WorkspaceSnapshot {
         meetingId,
         speakerLabel: "A",
         personId: benId,
+        identitySource: "manual",
+        identityConfidence: null,
         startMs: 55_000,
         endMs: 76_000,
         text: "Let’s put that into the polish pass and test it against the small stadium map before we touch the wider field.",
@@ -480,6 +556,11 @@ function readPreviewState(): WorkspaceSnapshot {
       theme: "light",
       apiKeyConfigured: false,
       pyannoteApiKeyConfigured: false,
+      privacyNoticeVersion: null,
+      biometricConsentAcceptedAt: null,
+      speakerIdentificationEnabled: false,
+      localSpeakerPersonId: null,
+      preferLocalSpeakerForMicrophone: true,
     },
   };
 }

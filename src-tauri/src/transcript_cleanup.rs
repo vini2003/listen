@@ -423,6 +423,8 @@ mod tests {
             meeting_id: "meeting".to_string(),
             speaker_label: "mixed:Speaker A".to_string(),
             person_id: None,
+            identity_source: None,
+            identity_confidence: None,
             start_ms: 0,
             end_ms: 1_000,
             text: text.to_string(),

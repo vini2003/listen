@@ -1,4 +1,4 @@
-import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, LockKeyhole, MonitorSpeaker, Save, Sparkles } from "lucide-react";
+import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, Fingerprint, LockKeyhole, MonitorSpeaker, Save, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useWorkspace } from "../../store/workspace";
 import { CustomSelect } from "../ui/CustomSelect";
@@ -10,7 +10,7 @@ interface SettingsDialogProps {
 }
 
 export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
-  const { settings, devices, updateSettings, setApiKey, setPyannoteApiKey, openDiagnostics, busy } = useWorkspace();
+  const { settings, devices, people, updateSettings, acknowledgePrivacyNotice, withdrawBiometricConsent, setApiKey, setPyannoteApiKey, openDiagnostics, busy } = useWorkspace();
   const [pyannoteKey, setPyannoteKey] = useState("");
   const [openAiKey, setOpenAiKey] = useState("");
   const [showPyannoteKey, setShowPyannoteKey] = useState(false);
@@ -53,6 +53,21 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
               <div className="secret-input"><LockKeyhole size={16} /><input aria-label="Pyannote API key" autoComplete="off" type={showPyannoteKey ? "text" : "password"} value={pyannoteKey} onChange={(event) => setPyannoteKey(event.target.value)} placeholder={settings.pyannoteApiKeyConfigured ? "Replace pyannote key" : "pyannote API key"} /><button type="button" onClick={() => setShowPyannoteKey((show) => !show)} aria-label={showPyannoteKey ? "Hide key" : "Show key"}>{showPyannoteKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
               <button className="primary-button" disabled={!pyannoteKey.trim() || busy}><Save size={15} /> Save key</button>
             </form>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-icon"><Fingerprint size={18} /></div>
+          <div className="settings-section-body">
+            <div className="settings-heading"><div><h3>Voice identification <small>Optional</small></h3><p>Matches confident speaker clusters to permitted local voice profiles. Uncertain speakers stay unknown.</p></div>{settings.speakerIdentificationEnabled ? <span className="configured-badge"><CheckCircle2 size={14} /> Enabled</span> : null}</div>
+            {settings.speakerIdentificationEnabled ? (
+              <div className="voice-settings-actions">
+                {settings.localSpeakerPersonId ? <label className="settings-toggle"><input type="checkbox" checked={settings.preferLocalSpeakerForMicrophone} onChange={(event) => void updateSettings({ ...settings, preferLocalSpeakerForMicrophone: event.target.checked })} /><span>Prefer {people.find((person) => person.id === settings.localSpeakerPersonId)?.fullName || "my profile"} for clear microphone-only speech</span></label> : <p className="voice-owner-hint">Choose “This is me” for your profile in People to identify clear microphone-only speech.</p>}
+                <button className="danger-text-button" type="button" onClick={() => { if (window.confirm("Turn off voice identification and permanently delete every stored voice profile? Names, recordings, and transcripts will remain.")) void withdrawBiometricConsent(); }}><Trash2 size={15} /> Turn off and erase profiles</button>
+              </div>
+            ) : (
+              <button className="secondary-button" type="button" disabled={busy} onClick={() => void acknowledgePrivacyNotice(true)}><Fingerprint size={15} /> Enable voice identification</button>
+            )}
           </div>
         </section>
 

@@ -14,11 +14,13 @@ mod voice_reference;
 use std::path::PathBuf;
 
 use audio::RecordingManager;
+use chrono::Utc;
 use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
     AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
     Project, ProjectDraft, RecordingLevels, RecordingRequest, WorkspaceSnapshot,
+    PRIVACY_NOTICE_VERSION,
 };
 use error::{AppError, AppResult};
 use tauri::{Manager, State};
@@ -141,7 +143,14 @@ fn update_person(state: State<'_, AppState>, id: String, draft: PersonDraft) -> 
 
 #[tauri::command]
 fn delete_person(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    state.database.delete_person(&id)
+    credentials::delete_voiceprint(&id)?;
+    state.database.delete_person(&id)?;
+    let mut settings = state.database.settings()?;
+    if settings.local_speaker_person_id.as_deref() == Some(id.as_str()) {
+        settings.local_speaker_person_id = None;
+        state.database.update_settings(&settings)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -151,75 +160,171 @@ fn assign_speaker(
     speaker_label: String,
     person_id: Option<String>,
 ) -> AppResult<()> {
-    let previous_person_ids = state
-        .database
-        .speaker_segments(&meeting_id, &speaker_label)?
-        .into_iter()
-        .filter_map(|segment| segment.person_id)
-        .collect::<std::collections::HashSet<_>>();
     state
         .database
-        .assign_speaker(&meeting_id, &speaker_label, person_id.clone())?;
-    for previous_person_id in previous_person_ids {
-        if person_id.as_deref() == Some(previous_person_id.as_str()) {
-            continue;
+        .assign_speaker(&meeting_id, &speaker_label, person_id)
+}
+
+#[tauri::command]
+fn acknowledge_privacy_notice(
+    state: State<'_, AppState>,
+    enable_voice_identification: bool,
+) -> AppResult<AppSettings> {
+    let mut settings = state.database.settings()?;
+    settings.privacy_notice_version = Some(PRIVACY_NOTICE_VERSION.to_string());
+    settings.speaker_identification_enabled = enable_voice_identification;
+    settings.biometric_consent_accepted_at =
+        enable_voice_identification.then(|| Utc::now().to_rfc3339());
+    state.database.update_settings(&settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn set_person_voice_consent(
+    state: State<'_, AppState>,
+    person_id: String,
+    confirmed: bool,
+) -> AppResult<Person> {
+    if confirmed {
+        let settings = state.database.settings()?;
+        if !settings.speaker_identification_enabled
+            || settings.biometric_consent_accepted_at.is_none()
+        {
+            return Err(AppError::Validation(
+                "Enable voice identification in Settings first".to_string(),
+            ));
         }
-        let previous_reference = state
-            .database
-            .people()?
-            .into_iter()
-            .find(|person| person.id == previous_person_id)
-            .and_then(|person| person.reference_audio_data_url);
-        if voice_reference::reference_came_from(
-            previous_reference.as_deref(),
+    }
+    let vaulted_voiceprint_exists = credentials::voiceprint(&person_id)?.is_some();
+    let legacy_voiceprint = state
+        .database
+        .voice_profiles()?
+        .into_iter()
+        .find(|profile| profile.person_id == person_id)
+        .and_then(|profile| profile.voiceprint);
+    if !confirmed {
+        credentials::delete_voiceprint(&person_id)?;
+    }
+    state
+        .database
+        .set_person_voice_consent(&person_id, confirmed)?;
+    if confirmed {
+        if let Some(voiceprint) = legacy_voiceprint {
+            credentials::set_voiceprint(&person_id, &voiceprint)?;
+            state.database.clear_voiceprint_blob(&person_id)?;
+            state.database.activate_existing_voice_profile(&person_id)?;
+        } else if vaulted_voiceprint_exists {
+            state.database.activate_existing_voice_profile(&person_id)?;
+        }
+    }
+    if !confirmed {
+        let mut settings = state.database.settings()?;
+        if settings.local_speaker_person_id.as_deref() == Some(person_id.as_str()) {
+            settings.local_speaker_person_id = None;
+            state.database.update_settings(&settings)?;
+        }
+    }
+    state
+        .database
+        .people()?
+        .into_iter()
+        .find(|person| person.id == person_id)
+        .ok_or(AppError::NotFound("Person"))
+}
+
+#[tauri::command]
+fn withdraw_biometric_consent(state: State<'_, AppState>) -> AppResult<AppSettings> {
+    for profile in state.database.voice_profiles()? {
+        credentials::delete_voiceprint(&profile.person_id)?;
+    }
+    state.database.delete_all_voice_profiles()?;
+    let mut settings = state.database.settings()?;
+    settings.speaker_identification_enabled = false;
+    settings.biometric_consent_accepted_at = None;
+    settings.local_speaker_person_id = None;
+    state.database.update_settings(&settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn enroll_voice_profile(
+    state: State<'_, AppState>,
+    meeting_id: String,
+    speaker_label: String,
+    person_id: String,
+) -> AppResult<Person> {
+    let settings = state.database.settings()?;
+    if !settings.speaker_identification_enabled || settings.biometric_consent_accepted_at.is_none()
+    {
+        return Err(AppError::Validation(
+            "Voice identification is disabled".to_string(),
+        ));
+    }
+    state.database.mark_voice_profile_learning(&person_id)?;
+    let result = async {
+        let api_key = credentials::pyannote_key()?;
+        let client = pyannote::PyannoteClient::new(api_key)?;
+        let reference = voice_reference::learn_from_assignment(
+            &state.database,
+            &client,
             &meeting_id,
             &speaker_label,
+            &person_id,
+        )
+        .await?;
+        credentials::set_voiceprint(&person_id, &reference.voiceprint)?;
+        if let Err(error) = state.database.save_voice_profile(
+            &person_id,
+            &meeting_id,
+            &speaker_label,
+            reference.duration_ms,
+            reference.clip_count,
+            &reference.source,
         ) {
-            state.database.clear_person_reference(&previous_person_id)?;
+            let _ = credentials::delete_voiceprint(&person_id);
+            return Err(error);
+        }
+        Ok::<_, AppError>(reference)
+    }
+    .await;
+    match result {
+        Ok(reference) => {
+            state.diagnostics.record_voiceprint_learned(
+                &meeting_id,
+                &person_id,
+                &speaker_label,
+                &reference.source,
+                reference.duration_ms,
+                reference.clip_count,
+                reference.rms,
+                reference.dominance,
+            );
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            if matches!(error, AppError::Validation(_)) {
+                state
+                    .database
+                    .mark_voice_profile_pending(&person_id, &detail)?;
+            } else {
+                state
+                    .database
+                    .mark_voice_profile_failed(&person_id, &detail)?;
+            }
+            state.diagnostics.record_voiceprint_error(
+                &meeting_id,
+                &person_id,
+                &speaker_label,
+                &detail,
+            );
         }
     }
-    if let Some(person_id) = person_id {
-        let database = state.database.clone();
-        let diagnostics = state.diagnostics.clone();
-        tauri::async_runtime::spawn(async move {
-            let result = async {
-                let api_key = credentials::pyannote_key()?;
-                let client = pyannote::PyannoteClient::new(api_key)?;
-                voice_reference::learn_from_assignment(
-                    &database,
-                    &client,
-                    &meeting_id,
-                    &speaker_label,
-                    &person_id,
-                )
-                .await
-            }
-            .await;
-            match result {
-                Ok(reference) => {
-                    diagnostics.record_voiceprint_learned(
-                        &meeting_id,
-                        &person_id,
-                        &speaker_label,
-                        &reference.source,
-                        reference.start_ms,
-                        reference.end_ms,
-                        reference.rms,
-                        reference.dominance,
-                    );
-                }
-                Err(error) => {
-                    diagnostics.record_voiceprint_error(
-                        &meeting_id,
-                        &person_id,
-                        &speaker_label,
-                        &error.to_string(),
-                    );
-                }
-            }
-        });
-    }
-    Ok(())
+    state
+        .database
+        .people()?
+        .into_iter()
+        .find(|person| person.id == person_id)
+        .ok_or(AppError::NotFound("Person"))
 }
 
 #[tauri::command]
@@ -398,6 +503,17 @@ async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Me
             .diagnostics
             .record_pipeline_warning(meeting_id, "precision-2", &warning);
     }
+    for decision in &report.identity_decisions {
+        state.diagnostics.record_identity_decision(
+            meeting_id,
+            &decision.speaker,
+            decision.person_id.as_deref(),
+            decision.confidence,
+            decision.margin,
+            &decision.reason,
+            report.identity_candidates,
+        );
+    }
     state.diagnostics.record_transcription_completed(
         meeting_id,
         &report.active_sources,
@@ -418,6 +534,13 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let database = Database::open(app_data_dir.clone())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            for profile in database.voice_profiles().unwrap_or_default() {
+                if let Some(voiceprint) = profile.voiceprint {
+                    if credentials::set_voiceprint(&profile.person_id, &voiceprint).is_ok() {
+                        let _ = database.clear_voiceprint_blob(&profile.person_id);
+                    }
+                }
+            }
             app.manage(AppState {
                 database,
                 recordings_directory: app_data_dir.join("recordings"),
@@ -442,6 +565,10 @@ pub fn run() {
             update_person,
             delete_person,
             assign_speaker,
+            acknowledge_privacy_notice,
+            set_person_voice_consent,
+            withdraw_biometric_consent,
+            enroll_voice_profile,
             update_settings,
             set_api_key,
             set_pyannote_api_key,

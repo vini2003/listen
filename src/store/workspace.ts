@@ -54,6 +54,9 @@ interface WorkspaceState extends WorkspaceSnapshot {
   updatePerson: (id: string, draft: PersonDraft) => Promise<boolean>;
   deletePerson: (id: string) => Promise<boolean>;
   assignSpeaker: (meetingId: string, speakerLabel: string, personId: string | null) => Promise<boolean>;
+  acknowledgePrivacyNotice: (enableVoiceIdentification: boolean) => Promise<boolean>;
+  setPersonVoiceConsent: (personId: string, confirmed: boolean) => Promise<boolean>;
+  withdrawBiometricConsent: () => Promise<boolean>;
   updateSettings: (settings: AppSettings) => Promise<boolean>;
   setApiKey: (apiKey: string) => Promise<boolean>;
   setPyannoteApiKey: (apiKey: string) => Promise<boolean>;
@@ -85,6 +88,11 @@ const emptySnapshot: WorkspaceSnapshot = {
     theme: "system",
     apiKeyConfigured: false,
     pyannoteApiKeyConfigured: false,
+    privacyNoticeVersion: null,
+    biometricConsentAcceptedAt: null,
+    speakerIdentificationEnabled: false,
+    localSpeakerPersonId: null,
+    preferLocalSpeakerForMicrophone: true,
   },
 };
 
@@ -93,6 +101,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   let nextToastId = 1;
   const undoStack: HistoryEntry[] = [];
   const redoStack: HistoryEntry[] = [];
+  const enrollmentInFlight = new Set<string>();
 
   function showError(error: unknown): void {
     const toast = { id: nextToastId++, message: friendlyError(error) };
@@ -125,6 +134,27 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   async function refresh(): Promise<void> {
     const snapshot = await desktop.loadWorkspace();
     set(snapshot);
+  }
+
+  async function enrollFromAssignment(meetingId: string, speakerLabel: string, personId: string): Promise<void> {
+    const state = get();
+    const person = state.people.find((candidate) => candidate.id === personId);
+    if (!state.settings.speakerIdentificationEnabled
+      || !state.settings.pyannoteApiKeyConfigured
+      || !person?.voiceProfile?.consentConfirmedAt
+      || person.voiceProfile.status === "ready"
+      || person.voiceProfile.status === "learning"
+      || enrollmentInFlight.has(personId)) return;
+    enrollmentInFlight.add(personId);
+    try {
+      await desktop.enrollVoiceProfile(meetingId, speakerLabel, personId);
+      await refresh();
+    } catch (error) {
+      showError(error);
+      await refresh();
+    } finally {
+      enrollmentInFlight.delete(personId);
+    }
   }
 
   async function runHistory(direction: "undo" | "redo"): Promise<void> {
@@ -433,12 +463,47 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           undo: () => desktop.assignSpeaker(meetingId, speakerLabel, previousPersonId),
           redo: () => desktop.assignSpeaker(meetingId, speakerLabel, personId),
         });
+        if (personId) void enrollFromAssignment(meetingId, speakerLabel, personId);
         return true;
       } catch (error) {
         set({ segments: previousSegments });
         showError(error);
         return false;
       }
+    },
+
+    async acknowledgePrivacyNotice(enableVoiceIdentification) {
+      const result = await run(async () => {
+        await desktop.acknowledgePrivacyNotice(enableVoiceIdentification);
+        await refresh();
+        return true;
+      });
+      return result === true;
+    },
+
+    async setPersonVoiceConsent(personId, confirmed) {
+      const result = await run(async () => {
+        await desktop.setPersonVoiceConsent(personId, confirmed);
+        await refresh();
+        return true;
+      });
+      if (result !== true) return false;
+      if (confirmed) {
+        const assigned = get().segments
+          .filter((segment) => segment.personId === personId)
+          .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0];
+        if (assigned) void enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, personId);
+      }
+      return true;
+    },
+
+    async withdrawBiometricConsent() {
+      const result = await run(async () => {
+        await desktop.withdrawBiometricConsent();
+        await refresh();
+        return true;
+      });
+      return result === true;
     },
 
     async updateSettings(settings) {
@@ -465,6 +530,15 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         await refresh();
         return true;
       });
+      if (result === true && apiKey.trim()) {
+        for (const person of get().people) {
+          if (!person.voiceProfile?.consentConfirmedAt || person.voiceProfile.status === "ready") continue;
+          const assigned = get().segments
+            .filter((segment) => segment.personId === person.id)
+            .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0];
+          if (assigned) void enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, person.id);
+        }
+      }
       return result === true;
     },
 

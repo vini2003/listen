@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
-        Project, ProjectDraft, TranscriptSegment,
+        Project, ProjectDraft, StoredVoiceProfile, TranscriptSegment, VoiceProfileSummary,
     },
     error::{AppError, AppResult},
 };
@@ -77,11 +77,29 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS voice_profiles (
+                person_id TEXT PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL DEFAULT 'pyannote',
+                voiceprint TEXT,
+                status TEXT NOT NULL,
+                consent_confirmed_at TEXT,
+                enrollment_meeting_id TEXT,
+                enrollment_speaker_label TEXT,
+                enrollment_duration_ms INTEGER,
+                enrollment_clip_count INTEGER,
+                source TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS transcript_segments (
                 id TEXT PRIMARY KEY,
                 meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
                 speaker_label TEXT NOT NULL,
                 person_id TEXT REFERENCES people(id) ON DELETE SET NULL,
+                identity_source TEXT,
+                identity_confidence REAL,
                 start_ms INTEGER NOT NULL,
                 end_ms INTEGER NOT NULL,
                 text TEXT NOT NULL,
@@ -110,7 +128,68 @@ impl Database {
             ",
         )?;
         self.ensure_transcript_raw_text_column()?;
+        self.ensure_transcript_identity_columns()?;
         self.ensure_meeting_organization_columns()?;
+        self.migrate_legacy_voice_profiles()?;
+        Ok(())
+    }
+
+    fn ensure_transcript_identity_columns(&self) -> AppResult<()> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("PRAGMA table_info(transcript_segments)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|column| column == "identity_source") {
+            connection.execute(
+                "ALTER TABLE transcript_segments ADD COLUMN identity_source TEXT",
+                [],
+            )?;
+            connection.execute(
+                "UPDATE transcript_segments SET identity_source = 'manual' WHERE person_id IS NOT NULL",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "identity_confidence") {
+            connection.execute(
+                "ALTER TABLE transcript_segments ADD COLUMN identity_confidence REAL",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn migrate_legacy_voice_profiles(&self) -> AppResult<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let legacy = {
+            let mut statement = transaction.prepare(
+                "SELECT id, reference_audio_data_url FROM people WHERE reference_audio_data_url LIKE 'pyannote:%'",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let now = Utc::now().to_rfc3339();
+        for (person_id, encoded) in legacy {
+            let Some(voiceprint) = legacy_voiceprint(&encoded) else {
+                continue;
+            };
+            transaction.execute(
+                "INSERT OR IGNORE INTO voice_profiles(
+                    person_id, provider, voiceprint, status, created_at, updated_at
+                 ) VALUES(?1, 'pyannote', ?2, 'consent_required', ?3, ?3)",
+                params![person_id, voiceprint, now],
+            )?;
+            transaction.execute(
+                "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
+                [person_id],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -198,18 +277,33 @@ impl Database {
     pub fn people(&self) -> AppResult<Vec<Person>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, full_name, nickname, photo_data_url, reference_audio_data_url, color, created_at
-             FROM people ORDER BY COALESCE(nickname, full_name) COLLATE NOCASE",
+            "SELECT p.id, p.full_name, p.nickname, p.photo_data_url, p.color, p.created_at,
+                    v.status, v.consent_confirmed_at, v.enrollment_duration_ms,
+                    v.enrollment_clip_count, v.source, v.updated_at, v.last_error
+             FROM people p LEFT JOIN voice_profiles v ON v.person_id = p.id
+             ORDER BY COALESCE(p.nickname, p.full_name) COLLATE NOCASE",
         )?;
         let rows = statement.query_map([], |row| {
+            let voice_profile = match row.get::<_, Option<String>>(6)? {
+                Some(status) => Some(VoiceProfileSummary {
+                    status,
+                    consent_confirmed_at: row.get(7)?,
+                    enrollment_duration_ms: row.get(8)?,
+                    enrollment_clip_count: row.get(9)?,
+                    source: row.get(10)?,
+                    updated_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                    last_error: row.get(12)?,
+                }),
+                None => None,
+            };
             Ok(Person {
                 id: row.get(0)?,
                 full_name: row.get(1)?,
                 nickname: row.get(2)?,
                 photo_data_url: row.get(3)?,
-                reference_audio_data_url: row.get(4)?,
-                color: row.get(5)?,
-                created_at: row.get(6)?,
+                color: row.get(4)?,
+                created_at: row.get(5)?,
+                voice_profile,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -219,6 +313,7 @@ impl Database {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT segment.id, segment.meeting_id, segment.speaker_label, segment.person_id,
+                    segment.identity_source, segment.identity_confidence,
                     segment.start_ms, segment.end_ms, segment.text
              FROM transcript_segments segment
              JOIN meetings meeting ON meeting.id = segment.meeting_id
@@ -231,9 +326,11 @@ impl Database {
                 meeting_id: row.get(1)?,
                 speaker_label: row.get(2)?,
                 person_id: row.get(3)?,
-                start_ms: row.get(4)?,
-                end_ms: row.get(5)?,
-                text: row.get(6)?,
+                identity_source: row.get(4)?,
+                identity_confidence: row.get(5)?,
+                start_ms: row.get(6)?,
+                end_ms: row.get(7)?,
+                text: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -256,6 +353,25 @@ impl Database {
     }
 
     pub fn update_settings(&self, settings: &AppSettings) -> AppResult<()> {
+        if settings.speaker_identification_enabled
+            && settings.biometric_consent_accepted_at.is_none()
+        {
+            return Err(AppError::Validation(
+                "Voice identification requires biometric consent".to_string(),
+            ));
+        }
+        if let Some(person_id) = settings.local_speaker_person_id.as_deref() {
+            let permitted: bool = self.connection()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM voice_profiles WHERE person_id = ?1 AND consent_confirmed_at IS NOT NULL)",
+                [person_id],
+                |row| row.get(0),
+            )?;
+            if !permitted {
+                return Err(AppError::Validation(
+                    "Confirm this person's voice permission before selecting them as the microphone owner".to_string(),
+                ));
+            }
+        }
         let value = serde_json::to_string(settings)
             .map_err(|error| AppError::Validation(error.to_string()))?;
         self.connection()?.execute(
@@ -424,27 +540,26 @@ impl Database {
             full_name: required_text(draft.full_name, "Full name")?,
             nickname: clean_optional(draft.nickname),
             photo_data_url: clean_optional(draft.photo_data_url),
-            reference_audio_data_url: clean_optional(draft.reference_audio_data_url),
+            voice_profile: None,
             color: PERSON_COLORS[count as usize % PERSON_COLORS.len()].to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
         connection.execute(
             "INSERT INTO people(id, full_name, nickname, photo_data_url, reference_audio_data_url, color, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![person.id, person.full_name, person.nickname, person.photo_data_url, person.reference_audio_data_url, person.color, person.created_at],
+             VALUES(?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            params![person.id, person.full_name, person.nickname, person.photo_data_url, person.color, person.created_at],
         )?;
         Ok(person)
     }
 
     pub fn update_person(&self, id: &str, draft: PersonDraft) -> AppResult<Person> {
         self.connection()?.execute(
-            "UPDATE people SET full_name = ?1, nickname = ?2, photo_data_url = ?3, reference_audio_data_url = ?4
-             WHERE id = ?5",
+            "UPDATE people SET full_name = ?1, nickname = ?2, photo_data_url = ?3
+             WHERE id = ?4",
             params![
                 required_text(draft.full_name, "Full name")?,
                 clean_optional(draft.nickname),
                 clean_optional(draft.photo_data_url),
-                clean_optional(draft.reference_audio_data_url),
                 id,
             ],
         )?;
@@ -460,6 +575,145 @@ impl Database {
         Ok(())
     }
 
+    pub fn voice_profiles(&self) -> AppResult<Vec<StoredVoiceProfile>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT person_id, voiceprint, status, consent_confirmed_at
+             FROM voice_profiles",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(StoredVoiceProfile {
+                person_id: row.get(0)?,
+                voiceprint: row.get(1)?,
+                status: row.get(2)?,
+                consent_confirmed_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn set_person_voice_consent(&self, person_id: &str, confirmed: bool) -> AppResult<()> {
+        let connection = self.connection()?;
+        if confirmed {
+            let now = Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO voice_profiles(
+                    person_id, provider, status, consent_confirmed_at, created_at, updated_at
+                 ) VALUES(?1, 'pyannote', 'pending_sample', ?2, ?2, ?2)
+                 ON CONFLICT(person_id) DO UPDATE SET
+                    status = CASE WHEN voice_profiles.voiceprint IS NULL
+                                  THEN 'pending_sample' ELSE 'ready' END,
+                    consent_confirmed_at = excluded.consent_confirmed_at,
+                    last_error = NULL,
+                    updated_at = excluded.updated_at",
+                params![person_id, now],
+            )?;
+        } else {
+            connection.execute(
+                "DELETE FROM voice_profiles WHERE person_id = ?1",
+                [person_id],
+            )?;
+            connection.execute(
+                "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
+                [person_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_voice_profile_learning(&self, person_id: &str) -> AppResult<()> {
+        let now = Utc::now().to_rfc3339();
+        if self.connection()?.execute(
+            "UPDATE voice_profiles SET status = 'learning', last_error = NULL, updated_at = ?1
+             WHERE person_id = ?2 AND consent_confirmed_at IS NOT NULL",
+            params![now, person_id],
+        )? != 1
+        {
+            return Err(AppError::Validation(
+                "Confirm permission before creating this voice profile".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn save_voice_profile(
+        &self,
+        person_id: &str,
+        meeting_id: &str,
+        speaker_label: &str,
+        duration_ms: i64,
+        clip_count: i64,
+        source: &str,
+    ) -> AppResult<()> {
+        let now = Utc::now().to_rfc3339();
+        if self.connection()?.execute(
+            "UPDATE voice_profiles SET
+                voiceprint = NULL, status = 'ready', enrollment_meeting_id = ?1,
+                enrollment_speaker_label = ?2, enrollment_duration_ms = ?3,
+                enrollment_clip_count = ?4, source = ?5, last_error = NULL, updated_at = ?6
+             WHERE person_id = ?7 AND consent_confirmed_at IS NOT NULL",
+            params![
+                meeting_id,
+                speaker_label,
+                duration_ms,
+                clip_count,
+                source,
+                now,
+                person_id
+            ],
+        )? != 1
+        {
+            return Err(AppError::Validation(
+                "Voice profile permission was withdrawn during enrollment".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn clear_voiceprint_blob(&self, person_id: &str) -> AppResult<()> {
+        self.connection()?.execute(
+            "UPDATE voice_profiles SET voiceprint = NULL WHERE person_id = ?1",
+            [person_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn activate_existing_voice_profile(&self, person_id: &str) -> AppResult<()> {
+        self.connection()?.execute(
+            "UPDATE voice_profiles SET status = 'ready', last_error = NULL, updated_at = ?1
+             WHERE person_id = ?2 AND consent_confirmed_at IS NOT NULL",
+            params![Utc::now().to_rfc3339(), person_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_voice_profile_pending(&self, person_id: &str, detail: &str) -> AppResult<()> {
+        self.connection()?.execute(
+            "UPDATE voice_profiles SET status = 'pending_sample', last_error = ?1, updated_at = ?2
+             WHERE person_id = ?3 AND consent_confirmed_at IS NOT NULL",
+            params![detail, Utc::now().to_rfc3339(), person_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_voice_profile_failed(&self, person_id: &str, detail: &str) -> AppResult<()> {
+        self.connection()?.execute(
+            "UPDATE voice_profiles SET status = 'failed', last_error = ?1, updated_at = ?2
+             WHERE person_id = ?3 AND consent_confirmed_at IS NOT NULL",
+            params![detail, Utc::now().to_rfc3339(), person_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_all_voice_profiles(&self) -> AppResult<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM voice_profiles", [])?;
+        transaction.execute("UPDATE people SET reference_audio_data_url = NULL", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn assign_speaker(
         &self,
         meeting_id: &str,
@@ -467,7 +721,10 @@ impl Database {
         person_id: Option<String>,
     ) -> AppResult<()> {
         self.connection()?.execute(
-            "UPDATE transcript_segments SET person_id = ?1 WHERE meeting_id = ?2 AND speaker_label = ?3",
+            "UPDATE transcript_segments
+             SET person_id = ?1, identity_source = CASE WHEN ?1 IS NULL THEN NULL ELSE 'manual' END,
+                 identity_confidence = NULL
+             WHERE meeting_id = ?2 AND speaker_label = ?3",
             params![person_id, meeting_id, speaker_label],
         )?;
         Ok(())
@@ -480,7 +737,8 @@ impl Database {
     ) -> AppResult<Vec<TranscriptSegment>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, meeting_id, speaker_label, person_id, start_ms, end_ms, text
+            "SELECT id, meeting_id, speaker_label, person_id, identity_source,
+                    identity_confidence, start_ms, end_ms, text
              FROM transcript_segments
              WHERE meeting_id = ?1 AND speaker_label = ?2
              ORDER BY (end_ms - start_ms) DESC",
@@ -491,9 +749,11 @@ impl Database {
                 meeting_id: row.get(1)?,
                 speaker_label: row.get(2)?,
                 person_id: row.get(3)?,
-                start_ms: row.get(4)?,
-                end_ms: row.get(5)?,
-                text: row.get(6)?,
+                identity_source: row.get(4)?,
+                identity_confidence: row.get(5)?,
+                start_ms: row.get(6)?,
+                end_ms: row.get(7)?,
+                text: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -612,32 +872,6 @@ impl Database {
         Ok(message)
     }
 
-    pub fn claim_person_reference(&self, person_id: &str, data_url: &str) -> AppResult<()> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "UPDATE people SET reference_audio_data_url = NULL
-             WHERE id != ?1 AND reference_audio_data_url = ?2",
-            params![person_id, data_url],
-        )?;
-        transaction.execute(
-            "UPDATE people
-             SET reference_audio_data_url = ?1
-             WHERE id = ?2",
-            params![data_url, person_id],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn clear_person_reference(&self, person_id: &str) -> AppResult<()> {
-        self.connection()?.execute(
-            "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
-            [person_id],
-        )?;
-        Ok(())
-    }
-
     pub fn begin_recording(&self, id: &str, audio_directory: &str) -> AppResult<Meeting> {
         self.connection()?.execute(
             "UPDATE meetings SET status = 'recording', started_at = COALESCE(started_at, ?1), ended_at = NULL,
@@ -692,13 +926,16 @@ impl Database {
         for segment in segments {
             transaction.execute(
                 "INSERT INTO transcript_segments(
-                    id, meeting_id, speaker_label, person_id, start_ms, end_ms, text, raw_text
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    id, meeting_id, speaker_label, person_id, identity_source,
+                    identity_confidence, start_ms, end_ms, text, raw_text
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
                 params![
                     segment.id,
                     segment.meeting_id,
                     segment.speaker_label,
                     segment.person_id,
+                    segment.identity_source,
+                    segment.identity_confidence,
                     segment.start_ms,
                     segment.end_ms,
                     segment.text,
@@ -804,6 +1041,21 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+fn legacy_voiceprint(value: &str) -> Option<String> {
+    if let Some(encoded) = value.strip_prefix("pyannote:v1:") {
+        return serde_json::from_str::<serde_json::Value>(encoded)
+            .ok()?
+            .get("voiceprint")?
+            .as_str()
+            .filter(|voiceprint| !voiceprint.trim().is_empty())
+            .map(ToOwned::to_owned);
+    }
+    value
+        .strip_prefix("pyannote:")
+        .filter(|voiceprint| !voiceprint.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,6 +1149,8 @@ mod tests {
                     meeting_id: meeting.id.clone(),
                     speaker_label: "A".to_string(),
                     person_id: None,
+                    identity_source: None,
+                    identity_confidence: None,
                     start_ms: 0,
                     end_ms: 500,
                     text: "Still here".to_string(),
@@ -931,7 +1185,6 @@ mod tests {
                 full_name: "Ben Carter".to_string(),
                 nickname: Some("Ben".to_string()),
                 photo_data_url: None,
-                reference_audio_data_url: None,
             })
             .expect("person");
         database
@@ -942,6 +1195,8 @@ mod tests {
                     meeting_id: meeting.id.clone(),
                     speaker_label: "A".to_string(),
                     person_id: Some(person.id.clone()),
+                    identity_source: Some("manual".to_string()),
+                    identity_confidence: None,
                     start_ms: 0,
                     end_ms: 1_000,
                     text: "Keep this sentence.".to_string(),
@@ -970,6 +1225,8 @@ mod tests {
             meeting_id: meeting.id.clone(),
             speaker_label: "A".to_string(),
             person_id: None,
+            identity_source: None,
+            identity_confidence: None,
             start_ms: 0,
             end_ms: 1_000,
             text: "We tested hearing codecs.".to_string(),
@@ -1001,73 +1258,40 @@ mod tests {
     }
 
     #[test]
-    fn moves_an_identical_voice_reference_to_its_new_owner() {
+    fn voice_profile_requires_permission_and_can_be_deleted() {
         let (_directory, database) = database();
-        let max = database
-            .create_person(PersonDraft {
-                full_name: "Max".to_string(),
-                nickname: None,
-                photo_data_url: None,
-                reference_audio_data_url: Some("data:audio/wav;base64,voice".to_string()),
-            })
-            .expect("Max");
         let vinicius = database
             .create_person(PersonDraft {
                 full_name: "Vinicius".to_string(),
                 nickname: None,
                 photo_data_url: None,
-                reference_audio_data_url: None,
             })
             .expect("Vinicius");
 
         database
-            .claim_person_reference(&vinicius.id, "data:audio/wav;base64,voice")
-            .expect("claim voice");
+            .set_person_voice_consent(&vinicius.id, true)
+            .expect("confirm permission");
+        database
+            .save_voice_profile(
+                &vinicius.id,
+                "meeting",
+                "precision:SPEAKER_00",
+                18_000,
+                3,
+                "microphone",
+            )
+            .expect("save voice profile");
 
         let people = database.people().expect("people");
-        assert!(people
-            .iter()
-            .find(|person| person.id == max.id)
-            .expect("Max")
-            .reference_audio_data_url
+        let profile = people[0].voice_profile.as_ref().expect("voice profile");
+        assert_eq!(profile.status, "ready");
+        assert_eq!(profile.enrollment_duration_ms, Some(18_000));
+        database
+            .set_person_voice_consent(&vinicius.id, false)
+            .expect("withdraw permission");
+        assert!(database.people().expect("people")[0]
+            .voice_profile
             .is_none());
-        assert_eq!(
-            people
-                .iter()
-                .find(|person| person.id == vinicius.id)
-                .expect("Vinicius")
-                .reference_audio_data_url
-                .as_deref(),
-            Some("data:audio/wav;base64,voice"),
-        );
-    }
-
-    #[test]
-    fn relearning_a_voice_replaces_the_previous_reference() {
-        let (_directory, database) = database();
-        let vinicius = database
-            .create_person(PersonDraft {
-                full_name: "Vinicius".to_string(),
-                nickname: None,
-                photo_data_url: None,
-                reference_audio_data_url: Some("data:audio/wav;base64,existing".to_string()),
-            })
-            .expect("Vinicius");
-
-        database
-            .claim_person_reference(&vinicius.id, "data:audio/wav;base64,new")
-            .expect("claim voice");
-
-        let people = database.people().expect("people");
-        assert_eq!(
-            people
-                .iter()
-                .find(|person| person.id == vinicius.id)
-                .expect("Vinicius")
-                .reference_audio_data_url
-                .as_deref(),
-            Some("data:audio/wav;base64,new"),
-        );
     }
 
     #[test]
@@ -1087,6 +1311,8 @@ mod tests {
                     meeting_id: meeting.id.clone(),
                     speaker_label: "microphone:A".to_string(),
                     person_id: None,
+                    identity_source: None,
+                    identity_confidence: None,
                     start_ms: 0,
                     end_ms: 1_000,
                     text: "Keep this first part.".to_string(),

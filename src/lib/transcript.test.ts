@@ -8,6 +8,8 @@ function segment(id: string, speakerLabel: string, startMs: number, text: string
     meetingId: "meeting",
     speakerLabel,
     personId: null,
+    identitySource: null,
+    identityConfidence: null,
     startMs,
     endMs: startMs + 1_000,
     text,

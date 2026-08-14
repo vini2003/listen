@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -38,7 +38,16 @@ pub struct TranscriptionTurn {
 pub struct IdentificationSpan {
     pub start: f64,
     pub end: f64,
+    pub diarization_speaker: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceprintMatch {
+    pub speaker: String,
     pub r#match: Option<String>,
+    #[serde(default)]
+    pub confidence: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -50,6 +59,8 @@ pub struct JobOutput {
     pub turn_level_transcription: Vec<TranscriptionTurn>,
     #[serde(default)]
     pub identification: Vec<IdentificationSpan>,
+    #[serde(default)]
+    pub voiceprints: Vec<VoiceprintMatch>,
     pub voiceprint: Option<String>,
     pub warning: Option<String>,
     pub error: Option<String>,
@@ -105,6 +116,7 @@ struct IdentificationRequest<'a> {
     voiceprints: &'a [KnownVoiceprint],
     exclusive: bool,
     turn_level_confidence: bool,
+    confidence: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     min_speakers: Option<u8>,
     matching: MatchingConfig,
@@ -208,9 +220,10 @@ impl PyannoteClient {
             voiceprints,
             exclusive: true,
             turn_level_confidence: true,
+            confidence: true,
             min_speakers,
             matching: MatchingConfig {
-                exclusive: false,
+                exclusive: true,
                 threshold: IDENTIFICATION_THRESHOLD,
             },
         };

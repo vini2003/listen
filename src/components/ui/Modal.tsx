@@ -9,9 +9,10 @@ interface ModalProps {
   children: ReactNode;
   onClose: () => void;
   size?: "small" | "medium" | "large";
+  dismissible?: boolean;
 }
 
-export function Modal({ open, title, description, children, onClose, size = "medium" }: ModalProps) {
+export function Modal({ open, title, description, children, onClose, size = "medium", dismissible = true }: ModalProps) {
   const titleId = useId();
   const descriptionId = useId();
   const cardRef = useRef<HTMLElement>(null);
@@ -24,7 +25,7 @@ export function Modal({ open, title, description, children, onClose, size = "med
     returnFocusRef.current = document.activeElement as HTMLElement | null;
 
     function closeOnEscape(event: KeyboardEvent): void {
-      if (event.key === "Escape") {
+      if (dismissible && event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
       }
@@ -41,7 +42,7 @@ export function Modal({ open, title, description, children, onClose, size = "med
       const returnTarget = returnFocusRef.current;
       window.requestAnimationFrame(() => returnTarget?.isConnected && returnTarget.focus());
     };
-  }, [open]);
+  }, [open, dismissible]);
 
   function trapFocus(event: ReactKeyboardEvent<HTMLElement>): void {
     if (event.key !== "Tab") return;
@@ -66,7 +67,7 @@ export function Modal({ open, title, description, children, onClose, size = "med
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          onMouseDown={(event) => event.currentTarget === event.target && onClose()}
+          onMouseDown={(event) => dismissible && event.currentTarget === event.target && onClose()}
         >
           <motion.section
             ref={cardRef}
@@ -86,9 +87,7 @@ export function Modal({ open, title, description, children, onClose, size = "med
                 <h2 id={titleId}>{title}</h2>
                 {description ? <p id={descriptionId}>{description}</p> : null}
               </div>
-              <button className="icon-button" onClick={onClose} aria-label="Close dialog">
-                <X size={18} />
-              </button>
+              {dismissible ? <button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button> : null}
             </header>
             {children}
           </motion.section>

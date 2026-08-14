@@ -14,20 +14,20 @@ use crate::{
     speech_audio,
 };
 
-const MIN_REFERENCE_MS: i64 = 5_000;
-const MAX_REFERENCE_MS: i64 = 25_000;
+const MIN_REFERENCE_MS: i64 = 8_000;
+const MAX_REFERENCE_MS: i64 = 30_000;
+const MIN_CLIP_MS: i64 = 1_500;
 const MIN_SIGNAL_RMS: f64 = 140.0;
 const MIN_SOURCE_DOMINANCE: f64 = 1.65;
 const OVERLAP_TOLERANCE_MS: i64 = 200;
 const METADATA_FILENAME: &str = "precision-overlaps.json";
-const VOICEPRINT_PREFIX: &str = "pyannote:";
-const VOICEPRINT_V1_PREFIX: &str = "pyannote:v1:";
 
 #[derive(Debug)]
 pub struct LearnedVoiceprint {
+    pub voiceprint: String,
     pub source: String,
-    pub start_ms: i64,
-    pub end_ms: i64,
+    pub duration_ms: i64,
+    pub clip_count: i64,
     pub rms: f64,
     pub dominance: f64,
 }
@@ -39,15 +39,7 @@ struct TimeRange {
     end_ms: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredVoiceprint {
-    voiceprint: String,
-    meeting_id: String,
-    speaker_label: String,
-}
-
-struct ReferenceCandidate {
+struct ClipCandidate {
     source: &'static str,
     start_ms: i64,
     end_ms: i64,
@@ -55,6 +47,15 @@ struct ReferenceCandidate {
     rms: f64,
     dominance: f64,
     score: f64,
+}
+
+struct ReferenceCandidate {
+    source: &'static str,
+    samples: Vec<i16>,
+    duration_ms: i64,
+    clip_count: i64,
+    rms: f64,
+    dominance: f64,
 }
 
 pub async fn learn_from_assignment(
@@ -102,56 +103,20 @@ pub async fn learn_from_assignment(
                 "The speaker assignment changed before voice learning finished".to_string(),
             ));
         }
-        database.claim_person_reference(
-            person_id,
-            &encode_voiceprint(&voiceprint, meeting_id, speaker_label)?,
-        )?;
-        Ok::<_, AppError>(())
+        Ok::<_, AppError>(voiceprint)
     }
     .await;
     let _ = fs::remove_file(&reference_path);
-    result?;
+    let voiceprint = result?;
 
     Ok(LearnedVoiceprint {
+        voiceprint,
         source: candidate.source.to_string(),
-        start_ms: candidate.start_ms,
-        end_ms: candidate.end_ms,
+        duration_ms: candidate.duration_ms,
+        clip_count: candidate.clip_count,
         rms: candidate.rms,
         dominance: candidate.dominance,
     })
-}
-
-pub fn known_voiceprint(value: Option<&str>) -> Option<String> {
-    let value = value?;
-    if let Some(encoded) = value.strip_prefix(VOICEPRINT_V1_PREFIX) {
-        return serde_json::from_str::<StoredVoiceprint>(encoded)
-            .ok()
-            .map(|stored| stored.voiceprint)
-            .filter(|voiceprint| !voiceprint.trim().is_empty());
-    }
-    value
-        .strip_prefix(VOICEPRINT_PREFIX)
-        .filter(|voiceprint| !voiceprint.trim().is_empty())
-        .map(ToOwned::to_owned)
-}
-
-pub fn reference_came_from(value: Option<&str>, meeting_id: &str, speaker_label: &str) -> bool {
-    value
-        .and_then(|value| value.strip_prefix(VOICEPRINT_V1_PREFIX))
-        .and_then(|encoded| serde_json::from_str::<StoredVoiceprint>(encoded).ok())
-        .is_some_and(|stored| {
-            stored.meeting_id == meeting_id && stored.speaker_label == speaker_label
-        })
-}
-
-fn encode_voiceprint(voiceprint: &str, meeting_id: &str, speaker_label: &str) -> AppResult<String> {
-    let encoded = serde_json::to_string(&StoredVoiceprint {
-        voiceprint: voiceprint.to_string(),
-        meeting_id: meeting_id.to_string(),
-        speaker_label: speaker_label.to_string(),
-    })
-    .map_err(|error| AppError::Audio(format!("Could not store voice identity: {error}")))?;
-    Ok(format!("{VOICEPRINT_V1_PREFIX}{encoded}"))
 }
 
 pub fn write_overlap_metadata(directory: &Path, spans: &[SpeakerSpan]) -> AppResult<()> {
@@ -195,10 +160,10 @@ fn best_reference_candidate(
     all_segments: &[TranscriptSegment],
     excluded_ranges: &[TimeRange],
 ) -> AppResult<ReferenceCandidate> {
-    let mut best: Option<ReferenceCandidate> = None;
+    let mut clips = Vec::new();
     for segment in speaker_segments {
         let duration_ms = segment.end_ms - segment.start_ms;
-        if duration_ms < MIN_REFERENCE_MS {
+        if duration_ms < MIN_CLIP_MS {
             continue;
         }
         let (start_ms, end_ms) = centered_range(segment, MAX_REFERENCE_MS);
@@ -233,7 +198,7 @@ fn best_reference_candidate(
             continue;
         }
         let score = (end_ms - start_ms) as f64 * primary_rms.ln_1p() * dominance.min(8.0);
-        let candidate = ReferenceCandidate {
+        clips.push(ClipCandidate {
             source,
             start_ms,
             end_ms,
@@ -241,20 +206,62 @@ fn best_reference_candidate(
             rms: primary_rms,
             dominance,
             score,
-        };
-        if best
-            .as_ref()
-            .map_or(true, |current| candidate.score > current.score)
-        {
-            best = Some(candidate);
-        }
+        });
     }
 
-    best.ok_or_else(|| {
-        AppError::Validation(
-            "No clean 5-second single-speaker passage was available to learn this voice"
+    let best = ["microphone", "system"]
+        .into_iter()
+        .filter_map(|source| combine_clips(&clips, source))
+        .max_by(|left, right| {
+            left.duration_ms
+                .cmp(&right.duration_ms)
+                .then_with(|| left.rms.total_cmp(&right.rms))
+        });
+    best.filter(|candidate| candidate.duration_ms >= MIN_REFERENCE_MS)
+        .ok_or_else(|| {
+            AppError::Validation(
+            "At least 8 seconds of clean, single-speaker audio is needed for this voice profile"
                 .to_string(),
         )
+        })
+}
+
+fn combine_clips(clips: &[ClipCandidate], source: &'static str) -> Option<ReferenceCandidate> {
+    let mut selected = clips
+        .iter()
+        .filter(|clip| clip.source == source)
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| right.score.total_cmp(&left.score));
+    let mut samples = Vec::new();
+    let mut duration_ms = 0i64;
+    let mut weighted_rms = 0.0;
+    let mut weighted_dominance = 0.0;
+    let mut clip_count = 0i64;
+    for clip in selected {
+        let remaining_ms = MAX_REFERENCE_MS - duration_ms;
+        if remaining_ms <= 0 {
+            break;
+        }
+        let clip_duration_ms = clip.end_ms - clip.start_ms;
+        let used_ms = clip_duration_ms.min(remaining_ms);
+        let sample_count = if used_ms == clip_duration_ms {
+            clip.samples.len()
+        } else {
+            (clip.samples.len() as i64 * used_ms / clip_duration_ms) as usize
+        };
+        samples.extend_from_slice(&clip.samples[..sample_count]);
+        duration_ms += used_ms;
+        weighted_rms += clip.rms * used_ms as f64;
+        weighted_dominance += clip.dominance * used_ms as f64;
+        clip_count += 1;
+    }
+    (duration_ms > 0).then(|| ReferenceCandidate {
+        source,
+        samples,
+        duration_ms,
+        clip_count,
+        rms: weighted_rms / duration_ms as f64,
+        dominance: weighted_dominance / duration_ms as f64,
     })
 }
 
@@ -311,29 +318,30 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_precision_voiceprints() {
-        assert_eq!(
-            known_voiceprint(Some("pyannote:abc")),
-            Some("abc".to_string())
-        );
-        assert_eq!(known_voiceprint(Some("data:audio/wav;base64,old")), None);
-    }
-
-    #[test]
-    fn tracks_the_assignment_that_created_a_voiceprint() {
-        let encoded = encode_voiceprint("abc", "meeting-1", "precision:SPEAKER_00")
-            .expect("encoded voiceprint");
-
-        assert_eq!(known_voiceprint(Some(&encoded)), Some("abc".to_string()));
-        assert!(reference_came_from(
-            Some(&encoded),
-            "meeting-1",
-            "precision:SPEAKER_00"
-        ));
-        assert!(!reference_came_from(
-            Some(&encoded),
-            "meeting-2",
-            "precision:SPEAKER_00"
-        ));
+    fn combines_multiple_clean_clips_up_to_thirty_seconds() {
+        let clips = vec![
+            ClipCandidate {
+                source: "microphone",
+                start_ms: 0,
+                end_ms: 6_000,
+                samples: vec![1; 96_000],
+                rms: 400.0,
+                dominance: 10.0,
+                score: 10.0,
+            },
+            ClipCandidate {
+                source: "microphone",
+                start_ms: 7_000,
+                end_ms: 13_000,
+                samples: vec![2; 96_000],
+                rms: 500.0,
+                dominance: 12.0,
+                score: 12.0,
+            },
+        ];
+        let combined = combine_clips(&clips, "microphone").expect("combined clips");
+        assert_eq!(combined.duration_ms, 12_000);
+        assert_eq!(combined.clip_count, 2);
+        assert_eq!(combined.samples.len(), 192_000);
     }
 }

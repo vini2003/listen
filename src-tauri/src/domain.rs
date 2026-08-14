@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const PRIVACY_NOTICE_VERSION: &str = "2026-08-14";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -45,7 +47,7 @@ pub struct Person {
     pub full_name: String,
     pub nickname: Option<String>,
     pub photo_data_url: Option<String>,
-    pub reference_audio_data_url: Option<String>,
+    pub voice_profile: Option<VoiceProfileSummary>,
     pub color: String,
     pub created_at: String,
 }
@@ -56,7 +58,26 @@ pub struct PersonDraft {
     pub full_name: String,
     pub nickname: Option<String>,
     pub photo_data_url: Option<String>,
-    pub reference_audio_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceProfileSummary {
+    pub status: String,
+    pub consent_confirmed_at: Option<String>,
+    pub enrollment_duration_ms: Option<i64>,
+    pub enrollment_clip_count: Option<i64>,
+    pub source: Option<String>,
+    pub updated_at: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredVoiceProfile {
+    pub person_id: String,
+    pub voiceprint: Option<String>,
+    pub status: String,
+    pub consent_confirmed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +87,10 @@ pub struct TranscriptSegment {
     pub meeting_id: String,
     pub speaker_label: String,
     pub person_id: Option<String>,
+    #[serde(default)]
+    pub identity_source: Option<String>,
+    #[serde(default)]
+    pub identity_confidence: Option<f64>,
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
@@ -121,6 +146,16 @@ pub struct AppSettings {
     pub api_key_configured: bool,
     #[serde(default)]
     pub pyannote_api_key_configured: bool,
+    #[serde(default)]
+    pub privacy_notice_version: Option<String>,
+    #[serde(default)]
+    pub biometric_consent_accepted_at: Option<String>,
+    #[serde(default)]
+    pub speaker_identification_enabled: bool,
+    #[serde(default)]
+    pub local_speaker_person_id: Option<String>,
+    #[serde(default)]
+    pub prefer_local_speaker_for_microphone: bool,
 }
 
 impl Default for AppSettings {
@@ -133,6 +168,11 @@ impl Default for AppSettings {
             theme: "system".to_string(),
             api_key_configured: false,
             pyannote_api_key_configured: false,
+            privacy_notice_version: None,
+            biometric_consent_accepted_at: None,
+            speaker_identification_enabled: false,
+            local_speaker_person_id: None,
+            prefer_local_speaker_for_microphone: true,
         }
     }
 }
