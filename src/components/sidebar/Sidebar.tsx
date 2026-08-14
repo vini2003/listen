@@ -65,6 +65,7 @@ export function Sidebar({
   } = useWorkspace();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(projects.map((project) => project.id)));
   const [orderedProjects, setOrderedProjects] = useState(projects);
+  const [reorderingProjects, setReorderingProjects] = useState(false);
   const [draggedMeetingId, setDraggedMeetingId] = useState<string | null>(null);
   const [dropSpot, setDropSpot] = useState<DropSpot | null>(null);
   const [hoveredCollectionKey, setHoveredCollectionKey] = useState<string | null>(null);
@@ -306,7 +307,13 @@ export function Sidebar({
                 key={project.id}
                 as="div"
                 className="project-sort-item"
-                onDragEnd={() => void reorderProjects(orderedProjects.map((candidate) => candidate.id))}
+                layout="position"
+                transition={{ layout: { duration: reorderingProjects ? 0.16 : 0 } }}
+                onDragStart={() => setReorderingProjects(true)}
+                onDragEnd={() => {
+                  setReorderingProjects(false);
+                  void reorderProjects(orderedProjects.map((candidate) => candidate.id));
+                }}
               >
                 <div
                   className={`project-group ${hoveredCollectionKey === collectionKey(project.id) && draggedMeetingId ? "drop-target" : ""}`}
