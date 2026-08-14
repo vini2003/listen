@@ -87,8 +87,8 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
           <div className="settings-section-body">
             <div className="settings-heading"><div><h3>Default capture</h3></div></div>
             <div className="settings-grid">
-              <label><span>Microphone</span><CustomSelect ariaLabel="Microphone" value={settings.microphoneDeviceId ?? ""} options={microphoneOptions} onChange={(value) => void updateSettings({ ...settings, microphoneDeviceId: value || null })} /></label>
-              <label><span>Speaker</span><CustomSelect ariaLabel="Speaker" value={settings.systemDeviceId ?? ""} options={systemOptions} onChange={(value) => void updateSettings({ ...settings, systemDeviceId: value || null })} /></label>
+              <label><span>Microphone</span><CustomSelect ariaLabel="Microphone" maxVisibleOptions={4} value={settings.microphoneDeviceId ?? ""} options={microphoneOptions} onChange={(value) => void updateSettings({ ...settings, microphoneDeviceId: value || null })} /></label>
+              <label><span>Speaker</span><CustomSelect ariaLabel="Speaker" maxVisibleOptions={4} value={settings.systemDeviceId ?? ""} options={systemOptions} onChange={(value) => void updateSettings({ ...settings, systemDeviceId: value || null })} /></label>
             </div>
           </div>
         </section>

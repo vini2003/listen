@@ -14,6 +14,7 @@ interface CustomSelectProps {
   onChange: (value: string) => void;
   ariaLabel: string;
   compact?: boolean;
+  maxVisibleOptions?: number;
 }
 
 interface MenuPosition {
@@ -23,7 +24,7 @@ interface MenuPosition {
   openAbove: boolean;
 }
 
-export function CustomSelect({ value, options, onChange, ariaLabel, compact = false }: CustomSelectProps) {
+export function CustomSelect({ value, options, onChange, ariaLabel, compact = false, maxVisibleOptions = 6 }: CustomSelectProps) {
   const listboxId = useId();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -37,7 +38,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
-    const estimatedHeight = Math.min(options.length * 44 + 10, 280);
+    const estimatedHeight = Math.min(options.length, maxVisibleOptions) * 44 + 10;
     const roomBelow = window.innerHeight - rect.bottom;
     const openAbove = roomBelow < estimatedHeight + 12 && rect.top > roomBelow;
     setPosition({
@@ -63,7 +64,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
 
   useLayoutEffect(() => {
     if (open) measure();
-  }, [open, options.length]);
+  }, [open, options.length, maxVisibleOptions]);
 
   useEffect(() => {
     if (!open) return;
@@ -85,7 +86,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
       window.removeEventListener("resize", reposition);
       window.removeEventListener("scroll", reposition, true);
     };
-  }, [open, options.length]);
+  }, [open, options.length, maxVisibleOptions]);
 
   return (
     <>
@@ -126,7 +127,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
           className={`custom-select-menu ${position.openAbove ? "open-above" : ""}`}
           role="listbox"
           aria-label={ariaLabel}
-          style={{ left: position.left, top: position.top, width: position.width }}
+          style={{ left: position.left, top: position.top, width: position.width, maxHeight: Math.min(options.length, maxVisibleOptions) * 44 + 10 }}
           onKeyDown={(event) => {
             if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); triggerRef.current?.focus(); }
           }}

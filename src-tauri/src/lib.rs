@@ -457,6 +457,7 @@ async fn complete_chat(
     scope_id: String,
     content: String,
     message_id: Option<String>,
+    client_message_id: Option<String>,
 ) -> AppResult<Vec<ChatMessage>> {
     if !credentials::has_openai_key()? {
         return Err(AppError::Validation(
@@ -469,6 +470,7 @@ async fn complete_chat(
         &scope_id,
         content,
         message_id.as_deref(),
+        client_message_id.as_deref(),
     )?;
     let answer = match ai_chat::answer(&state.database, &api_key, &scope_type, &scope_id).await {
         Ok(answer) => answer,

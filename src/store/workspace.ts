@@ -645,10 +645,44 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async completeChat(scope, content, messageId = null) {
       const scopeKey = `${scope.scopeType}:${scope.scopeId}`;
-      set({ chatBusy: true });
+      const clientMessageId = messageId ? null : crypto.randomUUID();
+      const currentMessages = get().chatMessages;
+      const optimisticId = messageId || clientMessageId!;
+      const existing = messageId
+        ? currentMessages.find((message) => message.id === messageId && message.role === "user")
+        : null;
+      const optimistic: ChatMessage = {
+        id: optimisticId,
+        ...scope,
+        role: "user",
+        content: content.trim(),
+        position: existing?.position ?? currentMessages.length,
+        createdAt: existing?.createdAt ?? new Date().toISOString(),
+        pending: true,
+      };
+      const optimisticMessages = existing
+        ? currentMessages
+            .filter((message) => message.position <= existing.position)
+            .map((message) => message.id === existing.id ? optimistic : message)
+        : [...currentMessages, optimistic];
+      set({ chatBusy: true, chatMessages: optimisticMessages });
       try {
-        const messages = await desktop.completeChat(scope, content, messageId);
-        if (get().chatScopeKey === scopeKey) set({ chatMessages: messages });
+        const messages = await desktop.completeChat(scope, content, messageId, clientMessageId);
+        if (get().chatScopeKey === scopeKey) {
+          const visibleIds = new Set(get().chatMessages.map((message) => message.id));
+          set({
+            chatMessages: messages.map((message) => visibleIds.has(message.id)
+              ? message
+              : { ...message, justArrived: true }),
+          });
+          window.setTimeout(() => {
+            if (get().chatScopeKey === scopeKey) {
+              set((state) => ({
+                chatMessages: state.chatMessages.map(({ justArrived: _, ...message }) => message),
+              }));
+            }
+          }, 450);
+        }
         return true;
       } catch (error) {
         showError(error);

@@ -215,7 +215,7 @@ function DeviceSection({ title, enabled, onEnabledChange, devices, selectedId, o
         <span className="switch" />
       </label>
       {enabled ? (
-        <div className="device-options">
+        <div className={`device-options ${devices.length > 4 ? "scrollable" : ""}`}>
           {devices.length ? devices.map((device) => (
             <button
               key={device.id}

@@ -791,6 +791,7 @@ impl Database {
         scope_id: &str,
         content: String,
         message_id: Option<&str>,
+        client_message_id: Option<&str>,
     ) -> AppResult<ChatMessage> {
         validate_chat_scope(scope_type)?;
         let content = required_text(content, "Message")?;
@@ -834,6 +835,12 @@ impl Database {
                 ..existing
             }
         } else {
+            let id = match client_message_id {
+                Some(id) => Uuid::parse_str(id)
+                    .map_err(|_| AppError::Validation("Chat message ID is invalid".to_string()))?
+                    .to_string(),
+                None => Uuid::new_v4().to_string(),
+            };
             let position: i64 = transaction.query_row(
                 "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_messages
                  WHERE scope_type = ?1 AND scope_id = ?2",
@@ -841,7 +848,7 @@ impl Database {
                 |row| row.get(0),
             )?;
             let message = ChatMessage {
-                id: Uuid::new_v4().to_string(),
+                id,
                 scope_type: scope_type.to_string(),
                 scope_id: scope_id.to_string(),
                 role: "user".to_string(),
@@ -1377,6 +1384,7 @@ mod tests {
                 "meeting-one",
                 "What was decided?".to_string(),
                 None,
+                Some("35fd8172-d7bb-4d55-a531-b4a38f786170"),
             )
             .expect("first question");
         database
@@ -1387,7 +1395,7 @@ mod tests {
             )
             .expect("first answer");
         database
-            .prepare_chat_user_message("meeting", "meeting-one", "Why?".to_string(), None)
+            .prepare_chat_user_message("meeting", "meeting-one", "Why?".to_string(), None, None)
             .expect("follow-up");
 
         database
@@ -1396,6 +1404,7 @@ mod tests {
                 "meeting-one",
                 "What follow-up was agreed?".to_string(),
                 Some(&first.id),
+                None,
             )
             .expect("edited question");
 
@@ -1405,16 +1414,17 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "What follow-up was agreed?");
         assert_eq!(messages[0].position, 0);
+        assert_eq!(messages[0].id, "35fd8172-d7bb-4d55-a531-b4a38f786170");
     }
 
     #[test]
     fn chat_history_is_isolated_by_scope() {
         let (_directory, database) = database();
         database
-            .prepare_chat_user_message("meeting", "shared", "Meeting".to_string(), None)
+            .prepare_chat_user_message("meeting", "shared", "Meeting".to_string(), None, None)
             .expect("meeting message");
         database
-            .prepare_chat_user_message("project", "shared", "Project".to_string(), None)
+            .prepare_chat_user_message("project", "shared", "Project".to_string(), None, None)
             .expect("project message");
 
         assert_eq!(

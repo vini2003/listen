@@ -53,7 +53,7 @@ export interface DesktopService {
   transcribeMeeting(meetingId: string): Promise<Meeting>;
   loadSegmentAudio(meetingId: string, startMs: number, endMs: number): Promise<string>;
   loadChatMessages(scope: ChatScope): Promise<ChatMessage[]>;
-  completeChat(scope: ChatScope, content: string, messageId?: string | null): Promise<ChatMessage[]>;
+  completeChat(scope: ChatScope, content: string, messageId?: string | null, clientMessageId?: string | null): Promise<ChatMessage[]>;
 }
 
 const personColors = ["#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b"];
@@ -95,8 +95,8 @@ const tauriService: DesktopService = {
     invoke("load_segment_audio", { meetingId, startMs, endMs }),
   loadChatMessages: ({ scopeType, scopeId }) =>
     invoke("load_chat_messages", { scopeType, scopeId }),
-  completeChat: ({ scopeType, scopeId }, content, messageId = null) =>
-    invoke("complete_chat", { scopeType, scopeId, content, messageId }),
+  completeChat: ({ scopeType, scopeId }, content, messageId = null, clientMessageId = null) =>
+    invoke("complete_chat", { scopeType, scopeId, content, messageId, clientMessageId }),
 };
 
 function isTauri(): boolean {
@@ -347,7 +347,7 @@ function createBrowserPreviewService(): DesktopService {
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
       ));
     },
-    async completeChat(scope, content, messageId = null) {
+    async completeChat(scope, content, messageId = null, clientMessageId = null) {
       const scoped = chatMessages.filter(
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
       );
@@ -361,8 +361,9 @@ function createBrowserPreviewService(): DesktopService {
           || message.position <= existing.position,
         );
       } else {
-        chatMessages.push(makePreviewChatMessage(scope, "user", content, scoped.length));
+        chatMessages.push(makePreviewChatMessage(scope, "user", content, scoped.length, clientMessageId));
       }
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
       const nextPosition = chatMessages.filter(
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
       ).length;
@@ -385,9 +386,10 @@ function makePreviewChatMessage(
   role: "user" | "assistant",
   content: string,
   position: number,
+  id?: string | null,
 ): ChatMessage {
   return {
-    id: crypto.randomUUID(),
+    id: id || crypto.randomUUID(),
     ...scope,
     role,
     content: content.trim(),

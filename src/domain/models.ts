@@ -92,6 +92,8 @@ export interface ChatMessage {
   content: string;
   position: number;
   createdAt: string;
+  pending?: boolean;
+  justArrived?: boolean;
 }
 
 export interface AppSettings {

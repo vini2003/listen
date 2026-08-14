@@ -234,6 +234,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .chat-message { position: relative; max-width: 82%; padding: 8px 12px; border-radius: 16px; }
 .chat-message.user { align-self: flex-end; min-width: 52px; color: var(--text); background: var(--chat-user); border-bottom-right-radius: 5px; }
 .chat-message.assistant { align-self: flex-start; color: var(--chat-assistant-text); background: var(--chat-assistant); border-bottom-left-radius: 5px; }
+.chat-message.pending { cursor: default; }
 .chat-message-content { color: inherit; font-size: 12.5px; line-height: 1.45; user-select: text; }
 .chat-message-content > :first-child { margin-top: 0; }
 .chat-message-content > :last-child { margin-bottom: 0; }
@@ -314,6 +315,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 input:checked + .switch { background: #557966; }
 input:checked + .switch::after { transform: translateX(12px); }
 .device-options button { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 5px 8px; color: var(--text-soft); background: transparent; border-radius: 7px; font-size: 11px; text-align: left; }
+.device-options.scrollable { max-height: 176px; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; overscroll-behavior: contain; }
 .device-options button:hover, .device-options button.selected { color: var(--text); background: var(--hover); }
 .device-options p { margin: 5px 8px 8px; color: var(--text-faint); font-size: 10px; }
 .device-option-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; }
@@ -380,7 +382,7 @@ input:checked + .switch::after { transform: translateX(12px); }
 .custom-select-trigger:hover, .custom-select-trigger.open { background: var(--surface-raised); border-color: var(--border-strong); }
 .custom-select-trigger.open svg { transform: rotate(180deg); }
 .custom-select-trigger.compact { height: 38px; }
-.custom-select-menu { position: fixed; z-index: 400; max-height: 280px; overflow-y: auto; padding: 5px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 11px; box-shadow: var(--shadow-lg); transform-origin: top; animation: selectMenuIn 110ms ease-out; }
+.custom-select-menu { position: fixed; z-index: 400; max-height: 280px; overflow-y: auto; overscroll-behavior: contain; padding: 5px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 11px; box-shadow: var(--shadow-lg); transform-origin: top; animation: selectMenuIn 110ms ease-out; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .custom-select-menu.open-above { transform-origin: bottom; }
 .custom-select-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 38px; padding: 6px 8px; color: var(--text-soft); background: transparent; border-radius: 7px; text-align: left; }
 .custom-select-menu button:hover, .custom-select-menu button.active { color: var(--text); background: var(--hover); }

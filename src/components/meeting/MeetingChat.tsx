@@ -80,7 +80,8 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
     const content = draft.trim();
     if (!content || chatBusy || !settings.apiKeyConfigured) return;
     setExpanded(true);
-    if (await completeChat(scope, content)) setDraft("");
+    setDraft("");
+    await completeChat(scope, content);
   }
 
   async function saveEdit(message: ChatMessage): Promise<void> {
@@ -170,7 +171,14 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
                 </div>
               ) : (
                 chatMessages.map((message) => (
-                  <article className={`chat-message ${message.role}`} key={message.id}>
+                  <motion.article
+                    layout="position"
+                    className={`chat-message ${message.role} ${message.pending ? "pending" : ""}`}
+                    key={message.id}
+                    initial={message.pending || message.justArrived ? { opacity: 0, y: 8, scale: 0.96 } : false}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={{ type: "spring", stiffness: 470, damping: 34, mass: 0.72 }}
+                  >
                     {editingId === message.id ? (
                       <div className="chat-edit-box">
                         <textarea
@@ -198,7 +206,7 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
                         </Suspense>
                       </div>
                     )}
-                    {editingId !== message.id ? (
+                    {editingId !== message.id && !message.pending ? (
                       <div className="chat-message-actions">
                         {message.role === "user" ? (
                           <button onClick={() => { setEditingId(message.id); setEditDraft(message.content); }} title="Edit and resend" aria-label="Edit and resend message"><Pencil size={13} /></button>
@@ -210,12 +218,14 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
                         <button onClick={() => resend(message)} title="Resend" aria-label="Resend message" disabled={chatBusy}><RotateCcw size={13} /></button>
                       </div>
                     ) : null}
-                  </article>
+                  </motion.article>
                 ))
               )}
-              {chatBusy ? (
-                <div className="chat-thinking"><span /><span /><span /></div>
-              ) : null}
+              <AnimatePresence initial={false}>
+                {chatBusy ? (
+                  <motion.div className="chat-thinking" initial={{ opacity: 0, y: 5, scale: .94 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 3, scale: .96 }} transition={{ duration: .16 }}><span /><span /><span /></motion.div>
+                ) : null}
+              </AnimatePresence>
             </div>
           </motion.div>
         ) : null}
@@ -239,7 +249,6 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
           rows={1}
           maxLength={12_000}
           value={draft}
-          disabled={chatBusy}
           placeholder={settings.apiKeyConfigured
             ? "Ask about this meeting…"
             : "Add a text model API key in Settings…"}
@@ -256,7 +265,7 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
           disabled={!draft.trim() || chatBusy || !settings.apiKeyConfigured}
           aria-label="Send question"
         >
-          {chatBusy ? <LoaderCircle className="chat-spinner" size={16} /> : <Send size={16} />}
+          <Send size={16} />
         </button>
       </div>
     </section>
