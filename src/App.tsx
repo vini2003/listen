@@ -23,6 +23,11 @@ export default function App() {
     root.dataset.theme = workspace.settings.theme;
   }, [workspace.settings.theme]);
 
+  const selectedMeeting = useMemo(
+    () => workspace.meetings.find((meeting) => meeting.id === workspace.selectedMeetingId) ?? null,
+    [workspace.meetings, workspace.selectedMeetingId],
+  );
+
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent): void {
       const modifier = event.metaKey || event.ctrlKey;
@@ -30,10 +35,25 @@ export default function App() {
       const target = event.target as HTMLElement | null;
       const editingText = target?.matches("input, textarea, [contenteditable='true']") ?? false;
       const key = event.key.toLowerCase();
+      const dialogOpen = Boolean(document.querySelector('[role="dialog"]'));
 
-      if (key === "n") {
+      if (dialogOpen) return;
+
+      if (key === "n" && event.shiftKey) {
+        event.preventDefault();
+        setCreateProjectOpen(true);
+      } else if (key === "n") {
         event.preventDefault();
         openCreateMeeting(workspace.selectedProjectId);
+      } else if (key === ",") {
+        event.preventDefault();
+        setSettingsOpen(true);
+      } else if (key === "k") {
+        event.preventDefault();
+        document.querySelector<HTMLTextAreaElement>("[data-ask-composer]")?.focus();
+      } else if (key === "r" && event.shiftKey && selectedMeeting) {
+        event.preventDefault();
+        document.querySelector<HTMLButtonElement>(`[data-record-meeting="${selectedMeeting.id}"]`)?.click();
       } else if (!editingText && key === "z") {
         event.preventDefault();
         if (event.shiftKey) void workspace.redo();
@@ -45,12 +65,7 @@ export default function App() {
     }
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [workspace.redo, workspace.selectedProjectId, workspace.undo]);
-
-  const selectedMeeting = useMemo(
-    () => workspace.meetings.find((meeting) => meeting.id === workspace.selectedMeetingId) ?? null,
-    [workspace.meetings, workspace.selectedMeetingId],
-  );
+  }, [selectedMeeting, workspace.redo, workspace.selectedProjectId, workspace.undo]);
   function openCreateMeeting(projectId: string | null): void {
     setNewMeetingProjectId(projectId);
     setCreateMeetingOpen(true);

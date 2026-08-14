@@ -16,7 +16,8 @@ export function Avatar({ person, label = "Unknown", color = "#8a8a85", size = "m
       <img
         className={`avatar avatar-${size}`}
         src={person.photoDataUrl}
-        alt={displayName}
+        alt=""
+        aria-hidden="true"
       />
     );
   }
@@ -25,7 +26,7 @@ export function Avatar({ person, label = "Unknown", color = "#8a8a85", size = "m
     <span
       className={`avatar avatar-${size}`}
       style={{ backgroundColor: person?.color || color }}
-      aria-label={displayName}
+      aria-hidden="true"
     >
       {getInitials(displayName) || "?"}
     </span>

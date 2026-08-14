@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import type { Meeting } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
+import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
 
 interface RecordingDockProps {
@@ -90,6 +91,9 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
         className="device-summary"
         onClick={() => setDeviceMenuOpen((open) => !open)}
         disabled={recording || processing}
+        aria-haspopup="dialog"
+        aria-expanded={deviceMenuOpen}
+        aria-label="Choose recording devices"
       >
         <span className="device-summary-icons">
           <Mic size={15} />
@@ -106,6 +110,8 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
         {deviceMenuOpen ? (
           <motion.div
             className="device-menu"
+            role="dialog"
+            aria-label="Recording devices"
             initial={{ opacity: 0, y: 8, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 5, scale: 0.99 }}
@@ -168,6 +174,8 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
           disabled={processing || busy || (!settings.captureMicrophone && !settings.captureSystem)}
           aria-label={processing ? "Transcribing recording" : recording ? "Stop recording" : "Start recording"}
           aria-busy={processing}
+          aria-keyshortcuts={shortcutAria("r", { shift: true })}
+          title={`${recording ? "Stop" : "Start"} recording (${shortcutLabel("r", { shift: true })})`}
           style={meterStyle(levelHistory)}
         >
           {recording && !recordingPaused ? <span className="record-button-meter" /> : null}
@@ -251,7 +259,7 @@ function LiveWaveform({ frames, paused }: {
   paused: boolean;
 }) {
   return (
-    <div className={`live-waveform ${paused ? "is-paused" : ""}`} aria-label="Live audio levels">
+    <div className={`live-waveform ${paused ? "is-paused" : ""}`} aria-hidden="true">
       <AnimatePresence initial={false} mode="popLayout">
         {frames.map((frame) => {
           const contour = 0.72 + Math.sin(frame.id * 1.87) * 0.18 + Math.sin(frame.id * 0.47) * 0.1;

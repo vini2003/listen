@@ -19,10 +19,13 @@ import {
   useState,
   type DragEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
 } from "react";
 import type { Meeting, Project } from "../../domain/models";
+import { moveMenuFocus } from "../../lib/focus";
 import { meaningfulMeetingDrop, type MeetingDropSpot } from "../../lib/meetingDrop";
+import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
 import { ProjectActions } from "../project/ProjectActions";
 import { Modal } from "../ui/Modal";
@@ -85,6 +88,7 @@ export function Sidebar({
   const [projectDeleteCandidate, setProjectDeleteCandidate] = useState<Project | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<Meeting | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const contextTriggerRef = useRef<HTMLElement | null>(null);
   const dragPreviewRef = useRef<HTMLDivElement | null>(null);
   const projectClickTimerRef = useRef<number | null>(null);
 
@@ -103,6 +107,35 @@ export function Sidebar({
   }, []);
 
   useEffect(() => {
+    function handleItemShortcut(event: KeyboardEvent): void {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key !== "F2" && event.key !== "Delete") return;
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, [contenteditable='true']") || document.querySelector('[role="dialog"]')) return;
+
+      const projectId = target?.closest<HTMLElement>("[data-project-id]")?.dataset.projectId;
+      const meetingId = target?.closest<HTMLElement>("[data-meeting-id]")?.dataset.meetingId || selectedMeetingId;
+      const project = projects.find((candidate) => candidate.id === projectId);
+      const meeting = meetings.find((candidate) => candidate.id === meetingId);
+
+      if (event.key === "F2") {
+        if (project) beginProjectRename(project);
+        else if (meeting) beginRename(meeting);
+        else return;
+      } else {
+        if (project) setProjectDeleteCandidate(project);
+        else if (meeting) setDeleteCandidate(meeting);
+        else return;
+      }
+
+      event.preventDefault();
+    }
+
+    window.addEventListener("keydown", handleItemShortcut);
+    return () => window.removeEventListener("keydown", handleItemShortcut);
+  }, [meetings, projects, selectedMeetingId]);
+
+  useEffect(() => {
     if (!contextMenu && !projectContextMenu) return;
     function dismiss(event: PointerEvent): void {
       if (!contextMenuRef.current?.contains(event.target as Node)) {
@@ -114,6 +147,7 @@ export function Sidebar({
       if (event.key === "Escape") {
         setContextMenu(null);
         setProjectContextMenu(null);
+        window.requestAnimationFrame(() => contextTriggerRef.current?.focus());
       }
     }
     window.addEventListener("pointerdown", dismiss, true);
@@ -126,6 +160,11 @@ export function Sidebar({
       window.removeEventListener("pointerdown", dismiss, true);
       window.removeEventListener("keydown", closeOnEscape);
     };
+  }, [contextMenu, projectContextMenu]);
+
+  useEffect(() => {
+    if (!contextMenu && !projectContextMenu) return;
+    window.requestAnimationFrame(() => contextMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus());
   }, [contextMenu, projectContextMenu]);
 
   const meetingsByProject = useMemo(() => {
@@ -219,10 +258,14 @@ export function Sidebar({
     event.stopPropagation();
     const width = 238;
     const height = 94;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const anchorX = event.clientX || bounds.left + 24;
+    const anchorY = event.clientY || bounds.bottom;
+    contextTriggerRef.current = event.currentTarget as HTMLElement;
     setContextMenu({
       meetingId: meeting.id,
-      x: Math.min(event.clientX, window.innerWidth - width - 10),
-      y: Math.min(event.clientY, window.innerHeight - height - 10),
+      x: Math.min(anchorX, window.innerWidth - width - 10),
+      y: Math.min(anchorY, window.innerHeight - height - 10),
     });
     setProjectContextMenu(null);
   }
@@ -232,12 +275,20 @@ export function Sidebar({
     event.stopPropagation();
     const width = 238;
     const height = 94;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const anchorX = event.clientX || bounds.left + 24;
+    const anchorY = event.clientY || bounds.bottom;
+    contextTriggerRef.current = event.currentTarget as HTMLElement;
     setProjectContextMenu({
       projectId: project.id,
-      x: Math.min(event.clientX, window.innerWidth - width - 10),
-      y: Math.min(event.clientY, window.innerHeight - height - 10),
+      x: Math.min(anchorX, window.innerWidth - width - 10),
+      y: Math.min(anchorY, window.innerHeight - height - 10),
     });
     setContextMenu(null);
+  }
+
+  function handleContextMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    if (moveMenuFocus(event.currentTarget, event.key)) event.preventDefault();
   }
 
   function beginRename(meeting: Meeting): void {
@@ -259,6 +310,7 @@ export function Sidebar({
       if (!await renameProject(project.id, nextName)) return;
     }
     setRenamingProjectId(null);
+    if (event) window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-project-id="${project?.id}"]`)?.focus());
   }
 
   async function commitRename(event?: FormEvent): Promise<void> {
@@ -269,6 +321,17 @@ export function Sidebar({
       if (!await renameMeeting(meeting.id, nextTitle)) return;
     }
     setRenamingId(null);
+    if (event) window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-meeting-id="${meeting?.id}"]`)?.focus());
+  }
+
+  function cancelProjectRename(projectId: string): void {
+    setRenamingProjectId(null);
+    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-project-id="${projectId}"]`)?.focus());
+  }
+
+  function cancelMeetingRename(meetingId: string): void {
+    setRenamingId(null);
+    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-meeting-id="${meetingId}"]`)?.focus());
   }
 
   function renderMeetingList(projectId: string | null, projectMeetings: Meeting[]) {
@@ -289,7 +352,7 @@ export function Sidebar({
               renameValue={renameValue}
               onRenameValueChange={setRenameValue}
               onCommitRename={commitRename}
-              onCancelRename={() => setRenamingId(null)}
+              onCancelRename={() => cancelMeetingRename(meeting.id)}
               onSelect={() => selectMeeting(meeting.id)}
               onBeginRename={() => beginRename(meeting)}
               onContextMenu={(event) => openContextMenu(event, meeting)}
@@ -310,22 +373,27 @@ export function Sidebar({
   }
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" aria-label="Listen workspace">
       <div className="sidebar-brand">
         <span className="brand-mark"><AudioLines size={18} strokeWidth={2.2} /></span>
         <span>Listen</span>
       </div>
 
-      <button className="new-recording-button" onClick={() => onCreateMeeting(selectedProjectId)}>
+      <button
+        className="new-recording-button"
+        onClick={() => onCreateMeeting(selectedProjectId)}
+        aria-keyshortcuts={shortcutAria("n")}
+        title={`New recording (${shortcutLabel("n")})`}
+      >
         <Mic size={17} />
         <span>New recording</span>
-        <kbd>⌘ N</kbd>
+        <kbd>{shortcutLabel("n")}</kbd>
       </button>
 
       <nav className="sidebar-navigation" aria-label="Projects and recordings">
         <div className="sidebar-section-heading">
           <span>Projects</span>
-          <button className="mini-icon-button" onClick={onCreateProject} aria-label="Create project">
+          <button className="mini-icon-button" onClick={onCreateProject} aria-label="Create project" aria-keyshortcuts={shortcutAria("n", { shift: true })} title={`Create project (${shortcutLabel("n", { shift: true })})`}>
             <FolderPlus size={16} />
           </button>
         </div>
@@ -363,7 +431,7 @@ export function Sidebar({
                     onDrop={(event) => void commitDrop(event, { projectId: project.id, index: projectMeetings.length })}
                   >
                     {hasMeetings ? (
-                      <button className="disclosure" onClick={() => toggleProject(project.id)} aria-label={`${isExpanded ? "Collapse" : "Expand"} ${project.name}`}>
+                      <button className="disclosure" onClick={() => toggleProject(project.id)} aria-label={`${isExpanded ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={isExpanded}>
                         {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                       </button>
                     ) : <span className="disclosure disclosure-placeholder" aria-hidden="true" />}
@@ -381,7 +449,7 @@ export function Sidebar({
                           onFocus={(event) => event.currentTarget.select()}
                           onBlur={() => void commitProjectRename()}
                           onKeyDown={(event) => {
-                            if (event.key === "Escape") setRenamingProjectId(null);
+                            if (event.key === "Escape") cancelProjectRename(project.id);
                           }}
                           aria-label={`Rename ${project.name}`}
                         />
@@ -389,6 +457,10 @@ export function Sidebar({
                     ) : (
                       <button
                         className="row-main"
+                        data-project-id={project.id}
+                        aria-keyshortcuts="F2 Delete ArrowLeft ArrowRight"
+                        aria-expanded={hasMeetings ? isExpanded : undefined}
+                        title="Open project · F2 rename · Delete remove"
                         onClick={() => {
                           if (hasMeetings) scheduleProjectToggle(project.id);
                         }}
@@ -397,6 +469,17 @@ export function Sidebar({
                           event.stopPropagation();
                           cancelScheduledProjectToggle();
                           beginProjectRename(project);
+                        }}
+                        onKeyDown={(event) => {
+                          if (!hasMeetings || event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                          event.preventDefault();
+                          cancelScheduledProjectToggle();
+                          setExpanded((current) => {
+                            const next = new Set(current);
+                            if (event.key === "ArrowRight") next.add(project.id);
+                            else next.delete(project.id);
+                            return next;
+                          });
                         }}
                       >
                         <Folder size={16} />
@@ -447,7 +530,7 @@ export function Sidebar({
 
       <footer className="sidebar-footer">
         <button onClick={onOpenPeople}><UserRound size={17} /><span>People</span></button>
-        <button onClick={onOpenSettings}><Settings size={17} /><span>Settings</span></button>
+        <button onClick={onOpenSettings} aria-keyshortcuts={shortcutAria(",")} title={`Settings (${shortcutLabel(",")})`}><Settings size={17} /><span>Settings</span></button>
       </footer>
 
       <AnimatePresence>
@@ -462,11 +545,14 @@ export function Sidebar({
             exit={{ opacity: 0, scale: 0.98, y: -2 }}
             transition={{ duration: 0.12 }}
             onContextMenu={(event) => event.preventDefault()}
+            onKeyDown={handleContextMenuKeyDown}
+            role="menu"
+            aria-label={`Actions for ${contextProject.name}`}
           >
-            <button onClick={() => { setProjectContextMenu(null); beginProjectRename(contextProject); }}><Pencil size={15} /> Rename</button>
-            <div className="menu-divider" />
-            <button className="danger-menu-item" onClick={() => { setProjectContextMenu(null); setProjectDeleteCandidate(contextProject); }}>
-              <Trash2 size={15} /> Delete
+            <button role="menuitem" onClick={() => { setProjectContextMenu(null); beginProjectRename(contextProject); }}><Pencil size={15} /> Rename <kbd className="menu-shortcut">F2</kbd></button>
+            <div className="menu-divider" role="separator" />
+            <button role="menuitem" className="danger-menu-item" onClick={() => { setProjectContextMenu(null); setProjectDeleteCandidate(contextProject); }}>
+              <Trash2 size={15} /> Delete <kbd className="menu-shortcut">Del</kbd>
             </button>
           </motion.div>
         ) : null}
@@ -481,11 +567,14 @@ export function Sidebar({
             exit={{ opacity: 0, scale: 0.98, y: -2 }}
             transition={{ duration: 0.12 }}
             onContextMenu={(event) => event.preventDefault()}
+            onKeyDown={handleContextMenuKeyDown}
+            role="menu"
+            aria-label={`Actions for ${contextMeeting.title}`}
           >
-            <button onClick={() => beginRename(contextMeeting)}><Pencil size={15} /> Rename</button>
-            <div className="menu-divider" />
-            <button className="danger-menu-item" onClick={() => { setContextMenu(null); setDeleteCandidate(contextMeeting); }}>
-              <Trash2 size={15} /> Delete
+            <button role="menuitem" onClick={() => beginRename(contextMeeting)}><Pencil size={15} /> Rename <kbd className="menu-shortcut">F2</kbd></button>
+            <div className="menu-divider" role="separator" />
+            <button role="menuitem" className="danger-menu-item" onClick={() => { setContextMenu(null); setDeleteCandidate(contextMeeting); }}>
+              <Trash2 size={15} /> Delete <kbd className="menu-shortcut">Del</kbd>
             </button>
           </motion.div>
         ) : null}
@@ -501,7 +590,7 @@ export function Sidebar({
         <div className="confirmation-content">
           <p><strong>{projectDeleteCandidate?.name}</strong> will be removed from the sidebar.</p>
           <div className="dialog-actions">
-            <button className="secondary-button" onClick={() => setProjectDeleteCandidate(null)}>Cancel</button>
+            <button autoFocus className="secondary-button" onClick={() => setProjectDeleteCandidate(null)}>Cancel</button>
             <button
               className="danger-button"
               disabled={busy}
@@ -528,7 +617,7 @@ export function Sidebar({
         <div className="confirmation-content">
           <p><strong>{deleteCandidate?.title}</strong> will be removed from the sidebar.</p>
           <div className="dialog-actions">
-            <button className="secondary-button" onClick={() => setDeleteCandidate(null)}>Cancel</button>
+            <button autoFocus className="secondary-button" onClick={() => setDeleteCandidate(null)}>Cancel</button>
             <button
               className="danger-button"
               disabled={busy}
@@ -620,6 +709,9 @@ function MeetingRow({
       ) : (
         <button
           className={`sidebar-row meeting-row ${selected ? "selected" : ""}`}
+          data-meeting-id={meeting.id}
+          aria-keyshortcuts="F2 Delete"
+          title="Open recording · F2 rename · Delete remove"
           draggable
           onClick={onSelect}
           onDoubleClick={(event) => {

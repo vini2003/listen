@@ -1,5 +1,5 @@
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 export interface SelectOption {
@@ -24,6 +24,7 @@ interface MenuPosition {
 }
 
 export function CustomSelect({ value, options, onChange, ariaLabel, compact = false }: CustomSelectProps) {
+  const listboxId = useId();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [position, setPosition] = useState<MenuPosition | null>(null);
@@ -92,9 +93,12 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
         ref={triggerRef}
         type="button"
         className={`custom-select-trigger ${compact ? "compact" : ""} ${open ? "open" : ""}`}
+        role="combobox"
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={listboxId}
+        aria-activedescendant={open ? `${listboxId}-option-${activeIndex}` : undefined}
         onClick={() => open ? setOpen(false) : openMenu()}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -105,7 +109,10 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
           if (event.key === "Enter" || event.key === " ") {
             if (open) { event.preventDefault(); choose(activeIndex); }
           }
+          if (event.key === "Home" && open) { event.preventDefault(); setActiveIndex(0); }
+          if (event.key === "End" && open) { event.preventDefault(); setActiveIndex(Math.max(0, options.length - 1)); }
           if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); }
+          if (event.key === "Tab" && open) setOpen(false);
         }}
       >
         <span>{selected?.label ?? "Select"}</span>
@@ -115,6 +122,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
       {open && position ? createPortal(
         <div
           ref={menuRef}
+          id={listboxId}
           className={`custom-select-menu ${position.openAbove ? "open-above" : ""}`}
           role="listbox"
           aria-label={ariaLabel}
@@ -127,7 +135,9 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
             <button
               key={option.value}
               type="button"
+              id={`${listboxId}-option-${index}`}
               role="option"
+              tabIndex={-1}
               aria-selected={option.value === value}
               className={`${option.value === value ? "selected" : ""} ${index === activeIndex ? "active" : ""}`}
               onMouseEnter={() => setActiveIndex(index)}

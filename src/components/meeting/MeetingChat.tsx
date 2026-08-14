@@ -23,6 +23,7 @@ import {
 } from "react";
 import type { ChatMessage, ChatScope, Meeting } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
+import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
 
 interface MeetingChatProps {
@@ -200,13 +201,13 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
                     {editingId !== message.id ? (
                       <div className="chat-message-actions">
                         {message.role === "user" ? (
-                          <button onClick={() => { setEditingId(message.id); setEditDraft(message.content); }} title="Edit and resend"><Pencil size={13} /></button>
+                          <button onClick={() => { setEditingId(message.id); setEditDraft(message.content); }} title="Edit and resend" aria-label="Edit and resend message"><Pencil size={13} /></button>
                         ) : (
-                          <button onClick={() => void copyMessage(message)} title="Copy response">
+                          <button onClick={() => void copyMessage(message)} title="Copy response" aria-label={copiedId === message.id ? "Response copied" : "Copy response"}>
                             {copiedId === message.id ? <Check size={13} /> : <Copy size={13} />}
                           </button>
                         )}
-                        <button onClick={() => resend(message)} title="Resend" disabled={chatBusy}><RotateCcw size={13} /></button>
+                        <button onClick={() => resend(message)} title="Resend" aria-label="Resend message" disabled={chatBusy}><RotateCcw size={13} /></button>
                       </div>
                     ) : null}
                   </article>
@@ -234,6 +235,7 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
         <Sparkles className="chat-composer-icon" size={16} />
         <textarea
           ref={textareaRef}
+          data-ask-composer
           rows={1}
           maxLength={12_000}
           value={draft}
@@ -244,6 +246,9 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
           onFocus={() => setExpanded(true)}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => handleComposerKeyDown(event, sendMessage)}
+          aria-label="Ask about this meeting"
+          aria-keyshortcuts={shortcutAria("k")}
+          title={`Focus Ask (${shortcutLabel("k")})`}
         />
         <button
           className="chat-send-button"

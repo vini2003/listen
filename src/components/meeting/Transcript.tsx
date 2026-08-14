@@ -1,8 +1,9 @@
 import { ChevronDown, LoaderCircle, Pause, Play, Sparkles, UserPlus } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
+import { focusFirstMenuItem, moveMenuFocus } from "../../lib/focus";
 import { mergeSequentialSegments } from "../../lib/transcript";
 import { useWorkspace } from "../../store/workspace";
 import { Avatar } from "../ui/Avatar";
@@ -154,8 +155,19 @@ interface TranscriptRowProps {
 function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, onTogglePlayback }: TranscriptRowProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useDismissableLayer<HTMLDivElement>(open, () => setOpen(false));
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuPanelRef = useRef<HTMLDivElement>(null);
   const person = people.find((candidate) => candidate.id === segment.personId);
   const speakerName = person?.fullName || anonymousName;
+
+  useEffect(() => {
+    if (open) window.requestAnimationFrame(() => focusFirstMenuItem(menuPanelRef.current));
+  }, [open]);
+
+  function handleMenuKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (moveMenuFocus(event.currentTarget, event.key)) event.preventDefault();
+    if (event.key === "Escape") window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }
 
   return (
     <article className="transcript-row">
@@ -165,23 +177,23 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
       <div className="transcript-copy">
         <div className="transcript-meta">
           <div className="speaker-picker-wrap" ref={menuRef}>
-            <button className="speaker-picker" onClick={() => setOpen((current) => !current)}>
+            <button ref={triggerRef} className="speaker-picker" onClick={() => setOpen((current) => !current)} aria-haspopup="menu" aria-expanded={open} aria-label={`Assign speaker for ${speakerName}`}>
               <strong>{speakerName}</strong><ChevronDown size={14} />
             </button>
             {open ? (
-              <div className="speaker-menu">
-                <button onClick={() => { onAssign(null); setOpen(false); }}>
+              <div ref={menuPanelRef} className="speaker-menu" role="menu" aria-label={`Assign ${speakerName} to a person`} onKeyDown={handleMenuKeyDown}>
+                <button role="menuitem" onClick={() => { onAssign(null); setOpen(false); }}>
                   <Avatar label={anonymousName.charAt(0).toUpperCase()} size="small" />
                   <span>{anonymousName}</span>
                 </button>
                 {people.map((candidate) => (
-                  <button key={candidate.id} onClick={() => { onAssign(candidate.id); setOpen(false); }}>
+                  <button role="menuitem" key={candidate.id} onClick={() => { onAssign(candidate.id); setOpen(false); }}>
                     <Avatar person={candidate} size="small" />
                     <span>{candidate.fullName}</span>
                     {candidate.id === segment.personId ? <span className="selection-check">✓</span> : null}
                   </button>
                 ))}
-                <button className="speaker-menu-add" onClick={() => { setOpen(false); onOpenPeople(); }}>
+                <button role="menuitem" className="speaker-menu-add" onClick={() => { setOpen(false); onOpenPeople(); }}>
                   <span className="avatar avatar-small"><UserPlus size={13} /></span>
                   <span>Add a person</span>
                 </button>
