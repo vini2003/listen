@@ -11,6 +11,7 @@ import type {
   Project,
   ProjectDraft,
   RecordingLevels,
+  TranscriptSegmentBackup,
   WorkspaceSnapshot,
 } from "../domain/models";
 
@@ -38,6 +39,8 @@ export interface DesktopService {
   updatePerson(id: string, draft: PersonDraft): Promise<Person>;
   deletePerson(id: string): Promise<void>;
   assignSpeaker(meetingId: string, speakerLabel: string, personId: string | null): Promise<void>;
+  deleteTranscriptSegments(ids: string[]): Promise<TranscriptSegmentBackup[]>;
+  restoreTranscriptSegments(backups: TranscriptSegmentBackup[]): Promise<void>;
   acknowledgePrivacyNotice(enableVoiceIdentification: boolean): Promise<AppSettings>;
   setPersonVoiceConsent(personId: string, confirmed: boolean): Promise<Person>;
   withdrawBiometricConsent(): Promise<AppSettings>;
@@ -75,6 +78,8 @@ const tauriService: DesktopService = {
   deletePerson: (id) => invoke("delete_person", { id }),
   assignSpeaker: (meetingId, speakerLabel, personId) =>
     invoke("assign_speaker", { meetingId, speakerLabel, personId }),
+  deleteTranscriptSegments: (ids) => invoke("delete_transcript_segments", { ids }),
+  restoreTranscriptSegments: (backups) => invoke("restore_transcript_segments", { backups }),
   acknowledgePrivacyNotice: (enableVoiceIdentification) =>
     invoke("acknowledge_privacy_notice", { enableVoiceIdentification }),
   setPersonVoiceConsent: (personId, confirmed) =>
@@ -240,6 +245,24 @@ function createBrowserPreviewService(): DesktopService {
       );
       persist();
     },
+    async deleteTranscriptSegments(ids) {
+      const idSet = new Set(ids);
+      const deleted = snapshot.segments
+        .filter((segment) => idSet.has(segment.id))
+        .map((segment) => ({ segment: structuredClone(segment), rawText: segment.text }));
+      if (deleted.length !== idSet.size) throw new Error("Transcript segment not found");
+      snapshot.segments = snapshot.segments.filter((segment) => !idSet.has(segment.id));
+      persist();
+      return deleted;
+    },
+    async restoreTranscriptSegments(backups) {
+      const existingIds = new Set(snapshot.segments.map((segment) => segment.id));
+      if (backups.some((backup) => existingIds.has(backup.segment.id))) {
+        throw new Error("Transcript segment already exists");
+      }
+      snapshot.segments.push(...backups.map((backup) => structuredClone(backup.segment)));
+      persist();
+    },
     async acknowledgePrivacyNotice(enableVoiceIdentification) {
       snapshot.settings.privacyNoticeVersion = "2026-08-14";
       snapshot.settings.speakerIdentificationEnabled = enableVoiceIdentification;
@@ -367,10 +390,14 @@ function createBrowserPreviewService(): DesktopService {
       const nextPosition = chatMessages.filter(
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
       ).length;
+      const referencedMeeting = snapshot.meetings.find((meeting) => meeting.id === scope.scopeId);
+      const previewReference = referencedMeeting
+        ? ` [[recording:${referencedMeeting.id}|12000|${referencedMeeting.title} 0:12]]`
+        : "";
       chatMessages.push(makePreviewChatMessage(
         scope,
         "assistant",
-        "In the desktop build, GPT-5.6 Luna answers this using the saved transcript and the conversation so far.",
+        `In the desktop build, GPT-5.6 Luna answers this using the saved transcript and the conversation so far.${previewReference}`,
         nextPosition,
       ));
       persistPreviewChats(chatMessages);

@@ -98,6 +98,13 @@ pub struct TranscriptSegment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TranscriptSegmentBackup {
+    pub segment: TranscriptSegment,
+    pub raw_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioDevice {
     pub id: String,
     pub name: String,

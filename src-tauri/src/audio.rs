@@ -652,11 +652,10 @@ fn write_f32(
         return;
     }
     store_level(data.iter().copied(), level);
-    let samples = data
-        .iter()
-        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-        .collect::<Vec<_>>();
-    write_samples(&samples, writer);
+    let mut writer = writer.lock();
+    for sample in data {
+        writer.write((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+    }
 }
 
 fn write_i16(
@@ -691,11 +690,10 @@ fn write_u16(
             .map(|sample| (*sample as f32 - 32_768.0) / 32_768.0),
         level,
     );
-    let samples = data
-        .iter()
-        .map(|sample| (*sample as i32 - 32_768) as i16)
-        .collect::<Vec<_>>();
-    write_samples(&samples, writer);
+    let mut writer = writer.lock();
+    for sample in data {
+        writer.write((*sample as i32 - 32_768) as i16);
+    }
 }
 
 fn store_level(samples: impl Iterator<Item = f32>, target: &AtomicU32) {

@@ -1,4 +1,5 @@
 import {
+  AudioLines,
   Check,
   ChevronUp,
   Copy,
@@ -18,24 +19,31 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ComponentPropsWithoutRef,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { ChatMessage, ChatScope, Meeting } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
+import { parseRecordingHref, renderableChatContent } from "../../lib/chatReferences";
 import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
 
 interface MeetingChatProps {
   meeting: Meeting;
+  widePanelWidth: number;
+  onWidePanelWidthChange: (width: number) => void;
+  onWidePanelResizeEnd: (width: number) => void;
 }
 
 const ReactMarkdown = lazy(() => import("react-markdown"));
 const DEFAULT_PANEL_HEIGHT = 360;
 
-export function MeetingChat({ meeting }: MeetingChatProps) {
+export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, onWidePanelResizeEnd }: MeetingChatProps) {
   const {
     settings,
+    meetings,
+    selectMeeting,
     chatMessages,
     chatLoading,
     chatBusy,
@@ -52,6 +60,7 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  const wideResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | null>(null);
   const panelVisible = expanded || wideLayout;
   const chatRef = useDismissableLayer<HTMLElement>(expanded && !wideLayout, () => setExpanded(false));
   const scope = useMemo<ChatScope>(() => ({
@@ -126,12 +135,84 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
     try { window.localStorage.setItem("listen.askPanelHeight", String(panelHeight)); } catch { /* Optional preference. */ }
   }
 
+  function beginWideResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    wideResizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: widePanelWidth,
+      width: widePanelWidth,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function resizeWidePanel(event: ReactPointerEvent<HTMLDivElement>): void {
+    const resize = wideResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const meetingWidth = event.currentTarget.closest<HTMLElement>(".meeting-view")?.clientWidth ?? window.innerWidth;
+    const maximum = Math.max(320, Math.min(760, meetingWidth - 460));
+    const width = Math.max(320, Math.min(maximum, resize.startWidth + resize.startX - event.clientX));
+    resize.width = width;
+    onWidePanelWidthChange(width);
+  }
+
+  function finishWideResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    const resize = wideResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    wideResizeRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    onWidePanelResizeEnd(resize.width);
+  }
+
+  function resetWidePanel(): void {
+    onWidePanelWidthChange(430);
+    onWidePanelResizeEnd(430);
+  }
+
+  function resizeWidePanelWithKeyboard(event: KeyboardEvent<HTMLDivElement>): void {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const meetingWidth = event.currentTarget.closest<HTMLElement>(".meeting-view")?.clientWidth ?? window.innerWidth;
+    const maximum = Math.max(320, Math.min(760, meetingWidth - 460));
+    const width = event.key === "Home"
+      ? 320
+      : event.key === "End"
+        ? maximum
+        : Math.max(320, Math.min(maximum, widePanelWidth + (event.key === "ArrowLeft" ? 24 : -24)));
+    onWidePanelWidthChange(width);
+    onWidePanelResizeEnd(width);
+  }
+
+  function openRecordingReference(meetingId: string, timeMs: number): void {
+    if (!meetings.some((candidate) => candidate.id === meetingId)) return;
+    selectMeeting(meetingId);
+    window.setTimeout(() => focusTranscriptTime(meetingId, timeMs), 60);
+  }
+
   return (
     <section
       ref={chatRef}
       className={`meeting-chat ${panelVisible ? "expanded" : "collapsed"} ${wideLayout ? "wide" : ""}`}
       style={{ "--chat-panel-height": `${panelHeight}px` } as CSSProperties}
     >
+      {wideLayout ? (
+        <div
+          className="chat-wide-resize-handle"
+          role="separator"
+          aria-label="Resize Ask sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={320}
+          aria-valuemax={760}
+          aria-valuenow={Math.round(widePanelWidth)}
+          tabIndex={0}
+          onDoubleClick={resetWidePanel}
+          onKeyDown={resizeWidePanelWithKeyboard}
+          onPointerDown={beginWideResize}
+          onPointerMove={resizeWidePanel}
+          onPointerUp={finishWideResize}
+          onPointerCancel={finishWideResize}
+        ><span /></div>
+      ) : null}
       <AnimatePresence initial={false}>
         {panelVisible ? (
           <motion.div
@@ -202,19 +283,24 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
                     ) : (
                       <div className="chat-message-content">
                         <Suspense fallback={<p>{message.content}</p>}>
-                          <ReactMarkdown>{message.content}</ReactMarkdown>
+                          <ReactMarkdown
+                            components={{
+                              a: (props) => <ChatLink {...props} onOpenRecording={openRecordingReference} />,
+                            }}
+                          >
+                            {renderableChatContent(message.content, meeting.id)}
+                          </ReactMarkdown>
                         </Suspense>
                       </div>
                     )}
                     {editingId !== message.id && !message.pending ? (
-                      <div className="chat-message-actions">
+                      <div className="message-action-bar chat-message-actions">
                         {message.role === "user" ? (
                           <button onClick={() => { setEditingId(message.id); setEditDraft(message.content); }} title="Edit and resend" aria-label="Edit and resend message"><Pencil size={13} /></button>
-                        ) : (
-                          <button onClick={() => void copyMessage(message)} title="Copy response" aria-label={copiedId === message.id ? "Response copied" : "Copy response"}>
-                            {copiedId === message.id ? <Check size={13} /> : <Copy size={13} />}
-                          </button>
-                        )}
+                        ) : null}
+                        <button onClick={() => void copyMessage(message)} title="Copy" aria-label={copiedId === message.id ? "Message copied" : "Copy message"}>
+                          {copiedId === message.id ? <Check size={13} /> : <Copy size={13} />}
+                        </button>
                         <button onClick={() => resend(message)} title="Resend" aria-label="Resend message" disabled={chatBusy}><RotateCcw size={13} /></button>
                       </div>
                     ) : null}
@@ -270,6 +356,45 @@ export function MeetingChat({ meeting }: MeetingChatProps) {
       </div>
     </section>
   );
+}
+
+function ChatLink({ href, children, onOpenRecording, ...props }: ComponentPropsWithoutRef<"a"> & {
+  onOpenRecording: (meetingId: string, timeMs: number) => void;
+}) {
+  const reference = parseRecordingHref(href);
+  if (!reference) {
+    return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
+  }
+  return (
+    <a
+      {...props}
+      href={href}
+      className="recording-reference"
+      onClick={(event) => {
+        event.preventDefault();
+        onOpenRecording(reference.meetingId, reference.timeMs);
+      }}
+    >
+      <AudioLines size={12} />
+      <span>{children}</span>
+    </a>
+  );
+}
+
+function focusTranscriptTime(meetingId: string, timeMs: number): void {
+  const rows = [...document.querySelectorAll<HTMLElement>(
+    `[data-meeting-id="${CSS.escape(meetingId)}"][data-transcript-start-ms]`,
+  )];
+  const target = rows.reduce<HTMLElement | null>((nearest, row) => {
+    if (!nearest) return row;
+    const rowDistance = Math.abs(Number(row.dataset.transcriptStartMs) - timeMs);
+    const nearestDistance = Math.abs(Number(nearest.dataset.transcriptStartMs) - timeMs);
+    return rowDistance < nearestDistance ? row : nearest;
+  }, null);
+  if (!target) return;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("reference-target");
+  window.setTimeout(() => target.classList.remove("reference-target"), 1_500);
 }
 
 function previousUserMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage | null {

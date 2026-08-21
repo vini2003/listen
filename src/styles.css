@@ -169,14 +169,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .recording-context-menu button > span:first-child { flex: 0 0 14px; width: 14px; }
 .recording-context-menu .danger-menu-item { color: var(--danger); }
 .menu-shortcut { margin-left: auto; color: var(--text-faint); font-family: inherit; font-size: 9.5px; font-weight: 540; }
-.transcript-container { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 48px 195px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.transcript-container { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 48px 195px; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%); mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%); scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .transcript-list { max-width: 820px; margin: 0 auto; }
 .transcript-notice { display: flex; align-items: center; gap: 8px; min-height: 38px; margin-bottom: 12px; padding: 8px 10px; color: var(--text-soft); background: var(--hover); border: 1px solid var(--border); border-radius: 9px; font-size: 10.5px; }
 .transcript-notice > span:nth-child(2) { flex: 1; }
 .transcript-notice button { padding: 5px 7px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 6px; font-size: 9.5px; }
 .warning-notice { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, var(--border)); }
 .notice-spinner { width: 12px; height: 12px; border: 1.5px solid var(--border-strong); border-top-color: var(--text-soft); border-radius: 50%; animation: softSpin 900ms linear infinite; }
-.transcript-row { display: grid; grid-template-columns: 30px 1fr; gap: 9px; padding: 7px 0; }
+.transcript-row { display: grid; grid-template-columns: 30px 1fr; gap: 9px; position: relative; margin-bottom: 2px; padding: 7px 0; border-radius: 8px; transition: background 180ms ease, box-shadow 180ms ease; }
+.transcript-row.reference-target { background: var(--selected); box-shadow: 0 0 0 5px var(--selected); }
 .transcript-speaker-column { padding-top: 0; }
 .avatar { display: inline-grid; place-items: center; flex: 0 0 auto; overflow: hidden; color: white; border-radius: 50%; object-fit: cover; font-size: 10px; font-weight: 690; letter-spacing: -0.02em; }
 .avatar-small { width: 25px; height: 25px; font-size: 8px; }
@@ -189,13 +190,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .speaker-picker:hover { background: var(--hover); }
 .speaker-picker strong { font-size: 12px; font-weight: 650; }
 .timestamp-label { color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
-.segment-playback-button { display: grid; place-items: center; width: 25px; height: 25px; margin: -3px 0 -2px auto; color: var(--text-soft); background: var(--hover); border: 1px solid transparent; border-radius: 7px; opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 120ms ease, background 120ms ease, color 120ms ease; }
-.transcript-row:hover .segment-playback-button, .transcript-row:focus-within .segment-playback-button, .segment-playback-button.is-playing { opacity: 1; transform: translateX(0); }
-.segment-playback-button:hover, .segment-playback-button.is-playing { color: var(--text); background: var(--selected); }
-.segment-playback-button:disabled { cursor: wait; }
 .segment-playback-spinner { animation: softSpin 800ms linear infinite; }
-@media (hover: none) { .segment-playback-button { opacity: 1; transform: none; } }
 .transcript-copy p { max-width: 700px; margin: 1px 0 0; color: var(--text); font-size: 14px; line-height: 1.43; }
+.transcript-message-actions { right: 2px; bottom: -16px; }
+.transcript-row:hover .transcript-message-actions, .transcript-row:focus-within .transcript-message-actions { opacity: 1; pointer-events: auto; transform: translateY(0); }
 .speaker-menu { position: absolute; z-index: 40; top: 28px; left: -6px; width: 220px; padding: 5px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); }
 .speaker-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 35px; padding: 4px 7px; background: transparent; border-radius: 7px; color: var(--text-soft); text-align: left; }
 .speaker-menu button:hover { color: var(--text); background: var(--hover); }
@@ -214,6 +212,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .meeting-chat { display: flex; flex-direction: column; position: absolute; z-index: 19; left: 50%; bottom: 100px; width: min(680px, calc(100% - 80px)); overflow: hidden; background: color-mix(in srgb, var(--surface-raised) 96%, transparent); border: 1px solid var(--border); border-radius: 15px; box-shadow: 0 10px 34px rgba(20, 20, 18, .1), var(--shadow-sm); transform: translateX(-50%); backdrop-filter: blur(18px); }
 .meeting-chat:focus-within { border-color: var(--border-strong); }
 .meeting-chat-panel { display: flex; flex-direction: column; position: relative; flex: 0 0 auto; height: min(var(--chat-panel-height, 360px), calc(100vh - 205px)); min-height: 0; overflow: hidden; border-bottom: 1px solid var(--border); }
+.chat-wide-resize-handle { display: grid; place-items: center; position: absolute; z-index: 8; top: 12px; bottom: 12px; left: 0; width: 11px; touch-action: none; cursor: ew-resize; }
+.chat-wide-resize-handle span { width: 2px; height: 46px; background: var(--border-strong); border-radius: 999px; opacity: .55; transition: height 120ms ease, opacity 120ms ease, background 120ms ease; }
+.chat-wide-resize-handle:hover span, .chat-wide-resize-handle:active span, .chat-wide-resize-handle:focus-visible span { height: 68px; background: var(--text-faint); opacity: 1; }
 .chat-resize-handle { display: grid; place-items: center; flex: 0 0 10px; height: 10px; touch-action: none; cursor: ns-resize; }
 .chat-resize-handle span { width: 38px; height: 3px; background: var(--border-strong); border-radius: 999px; transition: width 120ms ease, background 120ms ease; }
 .chat-resize-handle:hover span, .chat-resize-handle:active span { width: 48px; background: var(--text-faint); }
@@ -223,7 +224,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .chat-expand-button:hover { color: var(--text); background: var(--hover); }
 .chat-expand-button svg { transition: transform 140ms ease; }
 .meeting-chat.expanded .chat-expand-button svg { transform: rotate(180deg); }
-.meeting-chat-messages { display: flex; flex: 1; min-height: 105px; flex-direction: column; gap: 7px; overflow-y: auto; padding: 10px 16px 16px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.meeting-chat-messages { display: flex; flex: 1; min-height: 105px; flex-direction: column; gap: 7px; overflow-y: auto; padding: 18px 16px 16px; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 100%); mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 100%); scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .chat-loading, .chat-empty { display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 11px; }
 .chat-loading { gap: 7px; min-height: 90px; }
 .chat-spinner { animation: softSpin 800ms linear infinite; }
@@ -232,6 +233,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .chat-empty strong { color: var(--text); font-size: 12px; font-weight: 620; }
 .chat-empty span { margin-top: 4px; font-size: 10.5px; }
 .chat-message { position: relative; max-width: 82%; padding: 8px 12px; border-radius: 16px; }
+.chat-message, .chat-thinking { flex-shrink: 0; }
 .chat-message.user { align-self: flex-end; min-width: 52px; color: var(--text); background: var(--chat-user); border-bottom-right-radius: 5px; }
 .chat-message.assistant { align-self: flex-start; color: var(--chat-assistant-text); background: var(--chat-assistant); border-bottom-left-radius: 5px; }
 .chat-message.pending { cursor: default; }
@@ -244,15 +246,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .chat-message-content code { padding: 1px 4px; background: color-mix(in srgb, currentColor 12%, transparent); border-radius: 4px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: .92em; }
 .chat-message-content pre { overflow-x: auto; padding: 10px; background: color-mix(in srgb, currentColor 10%, transparent); border-radius: 8px; }
 .chat-message-content pre code { padding: 0; background: transparent; }
-.chat-message-actions { display: flex; gap: 2px; position: absolute; left: calc(100% + 5px); top: 50%; opacity: 0; transform: translateY(-50%); transition: opacity 110ms ease; }
-.chat-message.user .chat-message-actions { right: calc(100% + 5px); left: auto; }
-.chat-message:hover .chat-message-actions, .chat-message:focus-within .chat-message-actions { opacity: 1; }
-.chat-message-actions button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; color: var(--text-faint); background: transparent; border-radius: 6px; }
-.chat-message-actions button:hover { color: var(--text); background: var(--selected); }
+.message-action-bar { display: flex; gap: 1px; position: absolute; z-index: 5; padding: 2px; background: color-mix(in srgb, var(--surface-raised) 96%, transparent); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-sm); opacity: 0; pointer-events: none; transform: translateY(3px); transition: opacity 110ms ease, transform 110ms ease; backdrop-filter: blur(10px); }
+.message-action-bar button { display: grid; place-items: center; width: 25px; height: 25px; padding: 0; color: var(--text-faint); background: transparent; border-radius: 6px; }
+.message-action-bar button:hover, .message-action-bar button.is-playing { color: var(--text); background: var(--selected); }
+.message-action-bar button.danger-action:hover { color: var(--danger); background: var(--danger-soft); }
+.message-action-bar button:disabled { opacity: .35; cursor: default; }
+.chat-message-actions { right: 3px; bottom: -17px; }
+.chat-message:hover .chat-message-actions, .chat-message:focus-within .chat-message-actions { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.recording-reference { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; margin: 1px 2px; padding: 2px 6px; color: inherit; background: color-mix(in srgb, currentColor 10%, transparent); border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 6px; font-size: .92em; font-weight: 590; line-height: 1.35; text-decoration: none; vertical-align: baseline; }
+.recording-reference svg { flex: 0 0 auto; opacity: .76; }
+.recording-reference span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recording-reference:hover { background: color-mix(in srgb, currentColor 16%, transparent); border-color: color-mix(in srgb, currentColor 28%, transparent); }
 .chat-edit-box textarea { width: 100%; min-height: 62px; resize: vertical; padding: 8px 9px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; font-size: 12px; line-height: 1.45; outline: none; }
 .chat-edit-box > div { display: flex; justify-content: flex-end; gap: 4px; margin-top: 5px; }
 .chat-edit-box button { display: inline-flex; align-items: center; gap: 4px; height: 27px; padding: 0 8px; color: var(--text-soft); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 6px; font-size: 10px; }
-.chat-thinking { display: flex; align-items: center; gap: 4px; width: fit-content; height: 29px; padding: 0 12px; background: var(--chat-assistant); border-radius: 15px 15px 15px 5px; }
+.chat-thinking { display: flex; align-items: center; gap: 4px; width: fit-content; height: 29px; min-height: 29px; padding: 0 12px; background: var(--chat-assistant); border-radius: 15px 15px 15px 5px; }
 .chat-thinking span { width: 5px; height: 5px; background: var(--chat-assistant-text); border-radius: 50%; animation: chatDot 1.1s ease-in-out infinite; }
 .chat-thinking span:nth-child(2) { animation-delay: 120ms; }
 .chat-thinking span:nth-child(3) { animation-delay: 240ms; }
@@ -266,13 +274,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .chat-send-button:hover:not(:disabled) { opacity: .86; }
 .chat-send-button:disabled { color: var(--text-faint); background: var(--hover); }
 
-.meeting-view:has(.meeting-chat.wide) { display: grid; grid-template-columns: minmax(0, 1fr) 430px; grid-template-rows: auto minmax(0, 1fr); }
+.meeting-view:has(.meeting-chat.wide) { display: grid; grid-template-columns: minmax(0, 1fr) var(--wide-chat-width, 430px); grid-template-rows: auto minmax(0, 1fr); }
 .meeting-view:has(.meeting-chat.wide) .transcript-container { grid-column: 1; grid-row: 1 / 3; padding-right: 32px; padding-bottom: 125px; padding-left: 32px; }
-.meeting-view:has(.meeting-chat.wide) .recording-dock { left: calc((100% - 430px) / 2); width: min(680px, calc(100% - 494px)); }
+.meeting-view:has(.meeting-chat.wide) .recording-dock { left: calc((100% - var(--wide-chat-width, 430px)) / 2); width: min(680px, calc(100% - var(--wide-chat-width, 430px) - 64px)); }
 .meeting-chat.wide { grid-column: 2; grid-row: 1 / 3; position: relative; z-index: 21; left: auto; bottom: auto; width: auto; height: auto; margin: 16px 18px 24px 8px; transform: none; border-radius: 18px; }
 .meeting-chat.wide .meeting-chat-panel { flex: 1; height: auto; }
-.meeting-chat.wide .meeting-chat-messages { padding: 16px 15px 18px; }
+.meeting-chat.wide .meeting-chat-messages { padding: 20px 15px 18px; }
 .meeting-chat.wide .meeting-chat-composer { flex: 0 0 auto; min-height: 58px; padding: 9px 10px; }
+
+@media (hover: none) {
+  .message-action-bar { opacity: 1; pointer-events: auto; transform: none; }
+}
 
 .recording-dock { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; position: absolute; z-index: 20; left: 50%; bottom: 24px; width: min(680px, calc(100% - 80px)); min-height: 66px; padding: 8px 12px; background: color-mix(in srgb, var(--surface-raised) 94%, transparent); border: 1px solid var(--border); border-radius: 15px; box-shadow: 0 12px 40px rgba(20, 20, 18, 0.12), var(--shadow-sm); transform: translateX(-50%); backdrop-filter: blur(18px); }
 .recording-dock.is-recording { border-color: color-mix(in srgb, var(--recording) 35%, var(--border)); }
@@ -298,12 +310,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .pause-button { display: grid; place-items: center; overflow: hidden; height: 38px; padding: 0; color: var(--text-soft); background: var(--hover); border-radius: 50%; }
 .pause-button:hover { color: var(--text); background: var(--selected); }
 .live-waveform-wrap { overflow: hidden; flex: 0 0 auto; height: 38px; }
-.live-waveform { display: flex; align-items: center; justify-content: flex-end; overflow: hidden; gap: 2px; width: 126px; height: 38px; padding: 4px 2px; opacity: .96; mask-image: linear-gradient(to right, transparent 0%, rgba(0, 0, 0, .28) 8%, #000 21%, #000 100%); transition: opacity 140ms ease; }
+.live-waveform { overflow: hidden; width: 126px; height: 38px; opacity: .96; transition: opacity 140ms ease; }
 .live-waveform.is-paused { opacity: .4; }
-.waveform-column { display: flex; flex: 0 0 2px; align-items: center; justify-content: center; position: relative; width: 2px; height: 30px; }
-.waveform-bar { position: absolute; bottom: 50%; width: 2px; min-height: 2px; border-radius: 999px; transform: translateY(50%); transition: height 68ms linear, opacity 100ms ease; }
-.waveform-microphone { z-index: 2; background: var(--recording); }
-.waveform-system { z-index: 1; width: 3px; background: #6e8cf0; opacity: .42; }
+.live-waveform-canvas { display: block; width: 100%; height: 100%; }
 @keyframes pulse { 50% { opacity: 0.42; } }
 .device-menu { position: absolute; left: 0; bottom: 74px; width: 330px; padding: 8px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 13px; box-shadow: var(--shadow-lg); }
 .device-section + .device-section { margin-top: 7px; padding-top: 8px; border-top: 1px solid var(--border); }

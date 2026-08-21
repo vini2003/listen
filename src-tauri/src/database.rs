@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::{
     domain::{
         AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
-        Project, ProjectDraft, StoredVoiceProfile, TranscriptSegment, VoiceProfileSummary,
+        Project, ProjectDraft, StoredVoiceProfile, TranscriptSegment, TranscriptSegmentBackup,
+        VoiceProfileSummary,
     },
     error::{AppError, AppResult},
 };
@@ -989,6 +990,92 @@ impl Database {
         transaction.commit()?;
         Ok(())
     }
+
+    pub fn delete_transcript_segments(
+        &self,
+        mut ids: Vec<String>,
+    ) -> AppResult<Vec<TranscriptSegmentBackup>> {
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() || ids.len() > 500 {
+            return Err(AppError::Validation(
+                "Choose between 1 and 500 transcript segments".to_string(),
+            ));
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let mut deleted = Vec::with_capacity(ids.len());
+        for id in ids {
+            let backup = transaction
+                .query_row(
+                    "SELECT id, meeting_id, speaker_label, person_id, identity_source,
+                            identity_confidence, start_ms, end_ms, text, raw_text
+                     FROM transcript_segments WHERE id = ?1",
+                    [&id],
+                    |row| {
+                        Ok(TranscriptSegmentBackup {
+                            segment: TranscriptSegment {
+                                id: row.get(0)?,
+                                meeting_id: row.get(1)?,
+                                speaker_label: row.get(2)?,
+                                person_id: row.get(3)?,
+                                identity_source: row.get(4)?,
+                                identity_confidence: row.get(5)?,
+                                start_ms: row.get(6)?,
+                                end_ms: row.get(7)?,
+                                text: row.get(8)?,
+                            },
+                            raw_text: row.get(9)?,
+                        })
+                    },
+                )
+                .optional()?
+                .ok_or(AppError::NotFound("Transcript segment"))?;
+            transaction.execute("DELETE FROM transcript_segments WHERE id = ?1", [&id])?;
+            deleted.push(backup);
+        }
+        transaction.commit()?;
+        deleted.sort_by_key(|backup| backup.segment.start_ms);
+        Ok(deleted)
+    }
+
+    pub fn restore_transcript_segments(
+        &self,
+        backups: Vec<TranscriptSegmentBackup>,
+    ) -> AppResult<()> {
+        if backups.is_empty() || backups.len() > 500 {
+            return Err(AppError::Validation(
+                "Restore requires between 1 and 500 transcript segments".to_string(),
+            ));
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for backup in backups {
+            let segment = backup.segment;
+            transaction.execute(
+                "INSERT INTO transcript_segments(
+                    id, meeting_id, speaker_label, person_id, identity_source,
+                    identity_confidence, start_ms, end_ms, text, raw_text
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    segment.id,
+                    segment.meeting_id,
+                    segment.speaker_label,
+                    segment.person_id,
+                    segment.identity_source,
+                    segment.identity_confidence,
+                    segment.start_ms,
+                    segment.end_ms,
+                    segment.text,
+                    backup.raw_text,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
 }
 
 fn map_meeting(row: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
@@ -1441,5 +1528,58 @@ mod tests {
                 .content,
             "Project",
         );
+    }
+
+    #[test]
+    fn deleted_transcript_turn_can_be_restored_losslessly() {
+        let (_directory, database) = database();
+        let meeting = database
+            .create_meeting(MeetingDraft {
+                title: "Undoable transcript".to_string(),
+                project_id: None,
+            })
+            .expect("meeting");
+        let original = TranscriptSegment {
+            id: Uuid::new_v4().to_string(),
+            meeting_id: meeting.id.clone(),
+            speaker_label: "A".to_string(),
+            person_id: None,
+            identity_source: Some("voiceprint".to_string()),
+            identity_confidence: Some(0.91),
+            start_ms: 1_200,
+            end_ms: 2_800,
+            text: "Raw wording".to_string(),
+        };
+        database
+            .replace_segments(&meeting.id, vec![original.clone()])
+            .expect("segments");
+        let mut refined = original.clone();
+        refined.text = "Refined wording.".to_string();
+        database
+            .update_segment_texts(&meeting.id, &[refined])
+            .expect("refine");
+
+        let backups = database
+            .delete_transcript_segments(vec![original.id.clone()])
+            .expect("delete");
+        assert!(database.segments().expect("deleted segments").is_empty());
+        assert_eq!(backups[0].raw_text.as_deref(), Some("Raw wording"));
+
+        database
+            .restore_transcript_segments(backups)
+            .expect("restore");
+        let restored = &database.segments().expect("restored segments")[0];
+        assert_eq!(restored.text, "Refined wording.");
+        assert_eq!(restored.identity_confidence, Some(0.91));
+        let raw_text: String = database
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT raw_text FROM transcript_segments WHERE id = ?1",
+                [&original.id],
+                |row| row.get(0),
+            )
+            .expect("raw text");
+        assert_eq!(raw_text, "Raw wording");
     }
 }

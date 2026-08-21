@@ -3,8 +3,12 @@ import type { TranscriptSegment } from "../domain/models";
 const MAX_TURN_GAP_MS = 30_000;
 const MAX_TURN_DURATION_MS = 5 * 60_000;
 
-export function mergeSequentialSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
-  const turns: TranscriptSegment[] = [];
+export interface TranscriptTurn extends TranscriptSegment {
+  sourceSegmentIds: string[];
+}
+
+export function mergeSequentialSegments(segments: TranscriptSegment[]): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
   for (const segment of segments) {
     const previous = turns.at(-1);
     const sameSpeaker = previous
@@ -16,9 +20,10 @@ export function mergeSequentialSegments(segments: TranscriptSegment[]): Transcri
     if (sameSpeaker && nearby && withinPlaybackLimit) {
       previous.endMs = Math.max(previous.endMs, segment.endMs);
       previous.text = joinText(previous.text, segment.text);
+      previous.sourceSegmentIds.push(segment.id);
       continue;
     }
-    turns.push({ ...segment });
+    turns.push({ ...segment, sourceSegmentIds: [segment.id] });
   }
   return turns;
 }

@@ -56,6 +56,11 @@ export interface TranscriptSegment {
   text: string;
 }
 
+export interface TranscriptSegmentBackup {
+  segment: TranscriptSegment;
+  rawText: string | null;
+}
+
 export interface AudioDevice {
   id: string;
   name: string;

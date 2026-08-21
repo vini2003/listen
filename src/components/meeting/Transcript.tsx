@@ -1,10 +1,10 @@
-import { ChevronDown, LoaderCircle, Pause, Play, Sparkles, UserPlus } from "lucide-react";
+import { Check, ChevronDown, Copy, LoaderCircle, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
 import { focusFirstMenuItem, moveMenuFocus } from "../../lib/focus";
-import { mergeSequentialSegments } from "../../lib/transcript";
+import { mergeSequentialSegments, type TranscriptTurn } from "../../lib/transcript";
 import { useWorkspace } from "../../store/workspace";
 import { Avatar } from "../ui/Avatar";
 
@@ -22,10 +22,12 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
     transcribeMeeting,
     busy,
     loadSegmentAudio,
+    deleteTranscriptSegments,
   } = useWorkspace();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const meetingSegments = useMemo(
     () => segments
       .filter((segment) => segment.meetingId === meeting.id)
@@ -87,6 +89,21 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
     }
   }
 
+  async function copyTurn(segment: TranscriptTurn): Promise<void> {
+    await navigator.clipboard.writeText(segment.text);
+    setCopiedId(segment.id);
+    window.setTimeout(() => setCopiedId((current) => current === segment.id ? null : current), 1_400);
+  }
+
+  async function deleteTurn(segment: TranscriptTurn): Promise<void> {
+    if (playingAudioId === segment.id) {
+      audioRef.current?.pause();
+      audioRef.current = null;
+      setPlayingAudioId(null);
+    }
+    await deleteTranscriptSegments(segment.sourceSegmentIds);
+  }
+
   if (processing && !hasTranscript) {
     return (
       <div className="transcript-state">
@@ -133,7 +150,10 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
           canPlay={Boolean(meeting.audioDirectory)}
           loadingAudio={loadingAudioId === segment.id}
           playingAudio={playingAudioId === segment.id}
+          copied={copiedId === segment.id}
           onTogglePlayback={() => void togglePlayback(segment)}
+          onCopy={() => void copyTurn(segment)}
+          onDelete={() => void deleteTurn(segment)}
         />
       ))}
     </div>
@@ -141,7 +161,7 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
 }
 
 interface TranscriptRowProps {
-  segment: TranscriptSegment;
+  segment: TranscriptTurn;
   people: Person[];
   anonymousName: string;
   onAssign: (personId: string | null) => void;
@@ -149,10 +169,13 @@ interface TranscriptRowProps {
   canPlay: boolean;
   loadingAudio: boolean;
   playingAudio: boolean;
+  copied: boolean;
   onTogglePlayback: () => void;
+  onCopy: () => void;
+  onDelete: () => void;
 }
 
-function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, onTogglePlayback }: TranscriptRowProps) {
+function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, copied, onTogglePlayback, onCopy, onDelete }: TranscriptRowProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useDismissableLayer<HTMLDivElement>(open, () => setOpen(false));
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -170,7 +193,11 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
   }
 
   return (
-    <article className="transcript-row">
+    <article
+      className="transcript-row"
+      data-meeting-id={segment.meetingId}
+      data-transcript-start-ms={segment.startMs}
+    >
       <div className="transcript-speaker-column">
         <Avatar person={person} label={speakerName.charAt(0).toUpperCase()} />
       </div>
@@ -201,20 +228,26 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
             ) : null}
           </div>
           <span className="timestamp-label">{formatDuration(segment.startMs)}</span>
-          {canPlay ? (
-            <button
-              className={`segment-playback-button ${playingAudio ? "is-playing" : ""}`}
-              type="button"
-              onClick={onTogglePlayback}
-              aria-label={playingAudio ? `Pause audio for ${speakerName}` : `Play audio for ${speakerName}`}
-              title={playingAudio ? "Pause passage" : "Play passage"}
-              disabled={loadingAudio}
-            >
-              {loadingAudio ? <LoaderCircle className="segment-playback-spinner" size={14} /> : playingAudio ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
-            </button>
-          ) : null}
         </div>
         <p>{segment.text}</p>
+      </div>
+      <div className="message-action-bar transcript-message-actions" aria-label={`Actions for ${speakerName}'s message`}>
+        <button
+          type="button"
+          onClick={onTogglePlayback}
+          aria-label={playingAudio ? `Pause audio for ${speakerName}` : `Play audio for ${speakerName}`}
+          title={playingAudio ? "Pause passage" : "Play passage"}
+          disabled={!canPlay || loadingAudio}
+          className={playingAudio ? "is-playing" : ""}
+        >
+          {loadingAudio ? <LoaderCircle className="segment-playback-spinner" size={13} /> : playingAudio ? <Pause size={12} fill="currentColor" /> : <Play size={12} fill="currentColor" />}
+        </button>
+        <button type="button" onClick={onCopy} aria-label={copied ? "Message copied" : "Copy message"} title="Copy">
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+        </button>
+        <button className="danger-action" type="button" onClick={onDelete} aria-label="Delete message" title="Delete · Ctrl+Z to undo">
+          <Trash2 size={13} />
+        </button>
       </div>
     </article>
   );

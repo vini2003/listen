@@ -18,6 +18,8 @@ interface LevelFrame {
 }
 
 const WAVEFORM_FRAME_COUNT = 30;
+const LEVEL_POLL_INTERVAL_MS = 80;
+const BACKGROUND_LEVEL_POLL_INTERVAL_MS = 750;
 
 export function RecordingDock({ meeting }: RecordingDockProps) {
   const { devices, settings, updateSettings, startRecording, stopRecording, setRecordingPaused, getRecordingLevels, recordingPaused, busy } = useWorkspace();
@@ -39,6 +41,7 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
     }
 
     let cancelled = false;
+    let timer: number | null = null;
     const updateLevels = async (): Promise<void> => {
       try {
         const levels = await getRecordingLevels(meeting.id);
@@ -54,13 +57,21 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
         ]);
       } catch {
         // Stopping a recording can race with the final meter poll.
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(
+            () => void updateLevels(),
+            document.visibilityState === "visible"
+              ? LEVEL_POLL_INTERVAL_MS
+              : BACKGROUND_LEVEL_POLL_INTERVAL_MS,
+          );
+        }
       }
     };
     void updateLevels();
-    const timer = window.setInterval(() => void updateLevels(), 72);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [getRecordingLevels, meeting.id, recording, recordingPaused]);
 
@@ -258,37 +269,124 @@ function LiveWaveform({ frames, paused }: {
   frames: LevelFrame[];
   paused: boolean;
 }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const framesRef = useRef(frames);
+  const outgoingFrameRef = useRef<LevelFrame | null>(null);
+  const frameStartedAtRef = useRef(performance.now());
+  const pausedRef = useRef(paused);
+
+  useEffect(() => {
+    const previousFrames = framesRef.current;
+    const previousLatest = previousFrames[previousFrames.length - 1]?.id;
+    const nextLatest = frames[frames.length - 1]?.id;
+    if (previousLatest !== nextLatest) {
+      outgoingFrameRef.current = previousFrames[0] ?? null;
+      frameStartedAtRef.current = performance.now();
+    }
+    framesRef.current = frames;
+  }, [frames]);
+
+  useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    let animationFrame = 0;
+    let width = 0;
+    let height = 0;
+    let pixelRatio = 1;
+
+    const resize = (): void => {
+      const bounds = canvas.getBoundingClientRect();
+      width = bounds.width;
+      height = bounds.height;
+      pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const nextWidth = Math.max(1, Math.round(width * pixelRatio));
+      const nextHeight = Math.max(1, Math.round(height * pixelRatio));
+      if (canvas.width !== nextWidth) canvas.width = nextWidth;
+      if (canvas.height !== nextHeight) canvas.height = nextHeight;
+    };
+
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(canvas);
+    resize();
+
+    const draw = (now: number): void => {
+      const context = canvas.getContext("2d");
+      if (!context || width <= 0 || height <= 0) {
+        animationFrame = window.requestAnimationFrame(draw);
+        return;
+      }
+
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, height);
+
+      const currentFrames = framesRef.current;
+      const step = width / Math.max(1, WAVEFORM_FRAME_COUNT);
+      const progress = pausedRef.current
+        ? 1
+        : Math.min(1, Math.max(0, (now - frameStartedAtRef.current) / LEVEL_POLL_INTERVAL_MS));
+
+      const outgoing = outgoingFrameRef.current;
+      if (outgoing && progress < 1) {
+        drawWaveformFrame(context, outgoing, (progress - 1) * step, step, width, height, 1 - progress);
+      }
+      currentFrames.forEach((frame, index) => {
+        const x = (index + 1 - progress) * step;
+        drawWaveformFrame(context, frame, x, step, width, height, 1);
+      });
+
+      animationFrame = window.requestAnimationFrame(draw);
+    };
+
+    animationFrame = window.requestAnimationFrame(draw);
+    return () => {
+      resizeObserver.disconnect();
+      window.cancelAnimationFrame(animationFrame);
+    };
+  }, []);
+
   return (
     <div className={`live-waveform ${paused ? "is-paused" : ""}`} aria-hidden="true">
-      <AnimatePresence initial={false} mode="popLayout">
-        {frames.map((frame) => {
-          const contour = 0.72 + Math.sin(frame.id * 1.87) * 0.18 + Math.sin(frame.id * 0.47) * 0.1;
-          return (
-            <motion.span
-              className="waveform-column"
-              key={frame.id}
-              layout="position"
-              initial={{ opacity: 0, x: 4, scaleY: 0.45 }}
-              animate={{ opacity: 1, x: 0, scaleY: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{
-                layout: { duration: 0.085, ease: "linear" },
-                opacity: { duration: 0.12, ease: "linear" },
-                scaleY: { duration: 0.1, ease: "easeOut" },
-              }}
-            >
-              <i
-                className="waveform-bar waveform-system"
-                style={{ height: `${Math.max(2, frame.system * contour * 28)}px` }}
-              />
-              <i
-                className="waveform-bar waveform-microphone"
-                style={{ height: `${Math.max(2, frame.microphone * contour * 28)}px` }}
-              />
-            </motion.span>
-          );
-        })}
-      </AnimatePresence>
+      <canvas className="live-waveform-canvas" ref={canvasRef} />
     </div>
   );
+}
+
+function drawWaveformFrame(
+  context: CanvasRenderingContext2D,
+  frame: LevelFrame,
+  x: number,
+  step: number,
+  width: number,
+  height: number,
+  opacity: number,
+): void {
+  if (x < -step || x > width) return;
+  const contour = 0.72 + Math.sin(frame.id * 1.87) * 0.18 + Math.sin(frame.id * 0.47) * 0.1;
+  const edgeFade = Math.min(1, Math.max(0, x / Math.max(1, width * 0.2)));
+  const centerX = x + step / 2;
+  drawWaveformBar(context, centerX, frame.system * contour, height, 3, `rgba(110, 140, 240, ${0.42 * opacity * edgeFade})`);
+  drawWaveformBar(context, centerX, frame.microphone * contour, height, 2, `rgba(210, 76, 64, ${opacity * edgeFade})`);
+}
+
+function drawWaveformBar(
+  context: CanvasRenderingContext2D,
+  x: number,
+  level: number,
+  height: number,
+  width: number,
+  color: string,
+): void {
+  const barHeight = Math.max(2, level * (height - 10));
+  context.beginPath();
+  context.strokeStyle = color;
+  context.lineWidth = width;
+  context.lineCap = "round";
+  context.moveTo(x, height / 2 - barHeight / 2);
+  context.lineTo(x, height / 2 + barHeight / 2);
+  context.stroke();
 }

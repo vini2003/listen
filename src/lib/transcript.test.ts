@@ -27,6 +27,7 @@ describe("mergeSequentialSegments", () => {
     expect(turns).toHaveLength(2);
     expect(turns[0].text).toBe("Hello. How are you?");
     expect(turns[0].endMs).toBe(2_200);
+    expect(turns[0].sourceSegmentIds).toEqual(["one", "two"]);
   });
 
   it("keeps long pauses as separate turns", () => {

@@ -11,6 +11,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::error::{AppError, AppResult};
 
 pub const SPEECH_SAMPLE_RATE: u32 = 16_000;
+const MIX_BUFFER_DURATION_MS: i64 = 30 * 1_000;
 
 pub struct SpeechWavPart {
     pub bytes: Vec<u8>,
@@ -193,7 +194,7 @@ pub fn write_mixed_recording(directory: &Path, output_path: &Path) -> AppResult<
 
     let mut duration_ms = 0_i64;
     for tracks in sessions {
-        for part in MixedSpeechWavParts::new(tracks, 5 * 60 * 1_000) {
+        for part in MixedSpeechWavParts::new(tracks, MIX_BUFFER_DURATION_MS) {
             let part = part?;
             for sample in decode_wav(&part.bytes)? {
                 writer.write_sample(sample).map_err(|error| {
@@ -263,7 +264,7 @@ pub fn mixed_recording_clip_data_url(
     let mut timeline_ms = 0_i64;
     let mut clip = Vec::new();
     for tracks in recording_sessions(directory)? {
-        for part in MixedSpeechWavParts::new(tracks, 5 * 60 * 1_000) {
+        for part in MixedSpeechWavParts::new(tracks, MIX_BUFFER_DURATION_MS) {
             let part = part?;
             let part_end_ms = timeline_ms + part.duration_ms;
             if end_ms > timeline_ms && start_ms < part_end_ms {

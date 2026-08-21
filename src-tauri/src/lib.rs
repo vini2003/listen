@@ -20,8 +20,8 @@ use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
     AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
-    Project, ProjectDraft, RecordingLevels, RecordingRequest, WorkspaceSnapshot,
-    PRIVACY_NOTICE_VERSION,
+    Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
+    WorkspaceSnapshot, PRIVACY_NOTICE_VERSION,
 };
 use error::{AppError, AppResult};
 use tauri::{Manager, State};
@@ -167,6 +167,22 @@ fn assign_speaker(
     state
         .database
         .assign_speaker(&meeting_id, &speaker_label, person_id)
+}
+
+#[tauri::command]
+fn delete_transcript_segments(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> AppResult<Vec<TranscriptSegmentBackup>> {
+    state.database.delete_transcript_segments(ids)
+}
+
+#[tauri::command]
+fn restore_transcript_segments(
+    state: State<'_, AppState>,
+    backups: Vec<TranscriptSegmentBackup>,
+) -> AppResult<()> {
+    state.database.restore_transcript_segments(backups)
 }
 
 #[tauri::command]
@@ -598,6 +614,8 @@ pub fn run() {
             update_person,
             delete_person,
             assign_speaker,
+            delete_transcript_segments,
+            restore_transcript_segments,
             acknowledge_privacy_notice,
             set_person_voice_consent,
             withdraw_biometric_consent,

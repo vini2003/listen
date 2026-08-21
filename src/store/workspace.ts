@@ -54,6 +54,7 @@ interface WorkspaceState extends WorkspaceSnapshot {
   updatePerson: (id: string, draft: PersonDraft) => Promise<boolean>;
   deletePerson: (id: string) => Promise<boolean>;
   assignSpeaker: (meetingId: string, speakerLabel: string, personId: string | null) => Promise<boolean>;
+  deleteTranscriptSegments: (ids: string[]) => Promise<boolean>;
   acknowledgePrivacyNotice: (enableVoiceIdentification: boolean) => Promise<boolean>;
   setPersonVoiceConsent: (personId: string, confirmed: boolean) => Promise<boolean>;
   withdrawBiometricConsent: () => Promise<boolean>;
@@ -473,6 +474,29 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           redo: () => desktop.assignSpeaker(meetingId, speakerLabel, personId),
         });
         if (personId) void enrollFromAssignment(meetingId, speakerLabel, personId);
+        return true;
+      } catch (error) {
+        set({ segments: previousSegments });
+        showError(error);
+        return false;
+      }
+    },
+
+    async deleteTranscriptSegments(ids) {
+      const uniqueIds = [...new Set(ids)];
+      if (uniqueIds.length === 0) return false;
+      const previousSegments = get().segments;
+      const idSet = new Set(uniqueIds);
+      set((state) => ({
+        segments: state.segments.filter((segment) => !idSet.has(segment.id)),
+      }));
+      try {
+        const backups = await desktop.deleteTranscriptSegments(uniqueIds);
+        await refresh();
+        remember({
+          undo: () => desktop.restoreTranscriptSegments(backups),
+          redo: async () => { await desktop.deleteTranscriptSegments(uniqueIds); },
+        });
         return true;
       } catch (error) {
         set({ segments: previousSegments });
