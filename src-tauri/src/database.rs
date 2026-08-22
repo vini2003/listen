@@ -911,6 +911,15 @@ impl Database {
         self.meeting(id)
     }
 
+    pub fn recover_interrupted_recording(&self, id: &str, duration_ms: i64) -> AppResult<Meeting> {
+        self.connection()?.execute(
+            "UPDATE meetings SET status = 'ready', ended_at = ?1, duration_ms = ?2,
+                    error_message = NULL WHERE id = ?3 AND status = 'recording'",
+            params![Utc::now().to_rfc3339(), duration_ms, id],
+        )?;
+        self.meeting(id)
+    }
+
     pub fn mark_processing(&self, id: &str) -> AppResult<()> {
         self.connection()?.execute(
             "UPDATE meetings SET status = 'processing', error_message = NULL WHERE id = ?1",
@@ -1460,6 +1469,29 @@ mod tests {
 
         assert_eq!(updated.duration_ms, 4_000);
         assert_eq!(database.segments().expect("segments").len(), 1);
+    }
+
+    #[test]
+    fn recovers_an_interrupted_recording_with_its_measured_duration() {
+        let (directory, database) = database();
+        let meeting = database
+            .create_meeting(MeetingDraft {
+                title: "Interrupted conversation".to_string(),
+                project_id: None,
+            })
+            .expect("meeting");
+        let recording_path = directory.path().join("recordings");
+        database
+            .begin_recording(&meeting.id, recording_path.to_str().expect("path"))
+            .expect("begin recording");
+
+        let recovered = database
+            .recover_interrupted_recording(&meeting.id, 47_000)
+            .expect("recover recording");
+
+        assert_eq!(recovered.status, "ready");
+        assert_eq!(recovered.duration_ms, 47_000);
+        assert!(recovered.ended_at.is_some());
     }
 
     #[test]

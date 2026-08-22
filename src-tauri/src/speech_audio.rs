@@ -139,6 +139,21 @@ pub fn recording_sessions(directory: &Path) -> AppResult<Vec<Vec<Vec<PathBuf>>>>
         .collect())
 }
 
+pub fn recording_duration_ms(directory: &Path) -> AppResult<i64> {
+    recording_session_tracks(directory)?
+        .into_iter()
+        .try_fold(0_i64, |total, (_, tracks)| {
+            let session_duration = tracks
+                .values()
+                .map(|paths| track_duration_ms(paths))
+                .collect::<AppResult<Vec<_>>>()?
+                .into_iter()
+                .max()
+                .unwrap_or_default();
+            Ok(total.saturating_add(session_duration))
+        })
+}
+
 fn recording_session_tracks(
     directory: &Path,
 ) -> AppResult<Vec<(String, HashMap<String, Vec<PathBuf>>)>> {
@@ -669,6 +684,16 @@ mod tests {
 
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].duration_ms, 3_000);
+    }
+
+    #[test]
+    fn measures_sessions_without_double_counting_parallel_tracks() {
+        let directory = tempfile::tempdir().unwrap();
+        stereo_wav(&directory.path().join("microphone-123-0000.wav"), 2);
+        stereo_wav(&directory.path().join("system-123-0000.wav"), 3);
+        stereo_wav(&directory.path().join("microphone-456-0000.wav"), 4);
+
+        assert_eq!(recording_duration_ms(directory.path()).unwrap(), 7_000);
     }
 
     #[test]

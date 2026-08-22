@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Listen records your microphone when you start a recording.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Listen records call and application audio when you enable System Audio.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Listen uses Screen and System Audio Recording access to capture call and application audio.</string>
+</dict>
+</plist>
