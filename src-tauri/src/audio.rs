@@ -15,6 +15,10 @@ use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
 
+#[cfg(target_os = "macos")]
+use crate::macos_system_audio::{
+    MacSystemAudioCapture, SYSTEM_AUDIO_CHANNELS, SYSTEM_AUDIO_SAMPLE_RATE,
+};
 use crate::{
     domain::{AudioDevice, RecordingLevels, RecordingRequest},
     error::{AppError, AppResult},
@@ -235,6 +239,8 @@ struct ActiveRecording {
 
 enum CaptureStream {
     Cpal(cpal::Stream),
+    #[cfg(target_os = "macos")]
+    ScreenCaptureKit(MacSystemAudioCapture),
     #[cfg(target_os = "linux")]
     Pulse(PulseCapture),
 }
@@ -246,6 +252,8 @@ impl CaptureStream {
                 drop(stream);
                 Ok(())
             }
+            #[cfg(target_os = "macos")]
+            Self::ScreenCaptureKit(stream) => stream.stop().map_err(AppError::Audio),
             #[cfg(target_os = "linux")]
             Self::Pulse(stream) => stream.stop(),
         }
@@ -262,6 +270,7 @@ impl ActiveRecording {
         let host = cpal::default_host();
         let mut streams = Vec::new();
         let mut writers = Vec::new();
+        let session_started_at = Instant::now();
 
         let session_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -294,7 +303,7 @@ impl ActiveRecording {
                     Arc::clone(&levels.microphone),
                 )?
             };
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let (stream, writer) = start_cpal_microphone_stream(
                 &host,
                 request.microphone_device_id.as_deref(),
@@ -333,12 +342,21 @@ impl ActiveRecording {
                     Arc::clone(&levels.system),
                 )?
             };
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "windows")]
             let (stream, writer) = start_cpal_system_stream(
                 &host,
                 request.system_device_id.as_deref(),
                 &directory,
                 &prefix,
+                Arc::clone(&paused),
+                Arc::clone(&levels.system),
+            )?;
+            #[cfg(target_os = "macos")]
+            let (stream, writer) = start_macos_system_stream(
+                request.system_device_id.as_deref(),
+                &directory,
+                &prefix,
+                session_started_at,
                 Arc::clone(&paused),
                 Arc::clone(&levels.system),
             )?;
@@ -355,15 +373,45 @@ impl ActiveRecording {
         }
         let mut duration_ms = 0;
         for writer in self.writers {
-            let writer = Arc::try_unwrap(writer)
-                .map_err(|_| {
-                    AppError::Audio("An audio writer did not shut down cleanly".to_string())
-                })?
-                .into_inner();
-            duration_ms = duration_ms.max(writer.finish()?);
+            duration_ms = duration_ms.max(writer.lock().finish()?);
         }
         Ok(duration_ms)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn start_macos_system_stream(
+    device_id: Option<&str>,
+    directory: &Path,
+    prefix: &str,
+    session_started_at: Instant,
+    paused: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
+) -> AppResult<(CaptureStream, Arc<Mutex<SegmentWriter>>)> {
+    if device_id.is_some_and(|id| id != "macos-system-audio") {
+        return Err(AppError::Audio(
+            "The selected macOS system audio source is no longer available".to_string(),
+        ));
+    }
+    let writer = Arc::new(Mutex::new(SegmentWriter::new(
+        directory.to_path_buf(),
+        prefix.to_string(),
+        SYSTEM_AUDIO_SAMPLE_RATE as u32,
+        SYSTEM_AUDIO_CHANNELS as u16,
+    )?));
+    let callback_writer = Arc::clone(&writer);
+    let aligned = Arc::new(AtomicBool::new(false));
+    let stream = MacSystemAudioCapture::start(move |samples| {
+        if !aligned.swap(true, Ordering::AcqRel) {
+            let leading_frames = (session_started_at.elapsed().as_secs_f64()
+                * SYSTEM_AUDIO_SAMPLE_RATE as f64)
+                .round() as u64;
+            callback_writer.lock().write_silence_frames(leading_frames);
+        }
+        write_f32(samples, &callback_writer, &paused, &level);
+    })
+    .map_err(AppError::Audio)?;
+    Ok((CaptureStream::ScreenCaptureKit(stream), writer))
 }
 
 fn start_cpal_microphone_stream(
@@ -381,6 +429,7 @@ fn start_cpal_microphone_stream(
     start_source_stream(device, supported, directory, prefix, paused, level)
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn start_cpal_system_stream(
     host: &cpal::Host,
     device_id: Option<&str>,
@@ -563,7 +612,7 @@ impl SegmentWriter {
     }
 
     fn write(&mut self, sample: i16) {
-        if self.failed.is_some() {
+        if self.failed.is_some() || self.writer.is_none() {
             return;
         }
         if self.samples_in_part >= self.max_samples_per_part {
@@ -583,6 +632,13 @@ impl SegmentWriter {
     fn write_samples(&mut self, samples: &[i16]) {
         for sample in samples {
             self.write(*sample);
+        }
+    }
+
+    fn write_silence_frames(&mut self, frames: u64) {
+        let samples = frames.saturating_mul(self.channels as u64);
+        for _ in 0..samples {
+            self.write(0);
         }
     }
 
@@ -607,13 +663,13 @@ impl SegmentWriter {
         }
     }
 
-    fn finish(mut self) -> AppResult<i64> {
+    fn finish(&mut self) -> AppResult<i64> {
         if let Some(writer) = self.writer.take() {
             writer.finalize().map_err(|error| {
                 AppError::Audio(format!("Could not finalize recording: {error}"))
             })?;
         }
-        if let Some(error) = self.failed {
+        if let Some(error) = self.failed.take() {
             return Err(AppError::Audio(format!("Recording write failed: {error}")));
         }
         let frames = self.samples_total / self.channels as u64;
@@ -746,6 +802,7 @@ fn find_input_device(host: &cpal::Host, device_id: Option<&str>) -> AppResult<cp
         .ok_or_else(|| AppError::Audio("No microphone is available".to_string()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn find_system_device(host: &cpal::Host, device_id: Option<&str>) -> AppResult<cpal::Device> {
     #[cfg(target_os = "windows")]
     let devices = host.output_devices();
@@ -767,6 +824,7 @@ fn find_system_device(host: &cpal::Host, device_id: Option<&str>) -> AppResult<c
     ))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn system_input_config(device: &cpal::Device) -> AppResult<cpal::SupportedStreamConfig> {
     #[cfg(target_os = "windows")]
     let result = device.default_output_config();
@@ -788,7 +846,7 @@ pub fn list_devices() -> AppResult<Vec<AudioDevice>> {
     let default_input_name = host
         .default_input_device()
         .and_then(|device| device.name().ok());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     let default_output_name = host
         .default_output_device()
         .and_then(|device| device.name().ok());
@@ -821,14 +879,14 @@ pub fn list_devices() -> AppResult<Vec<AudioDevice>> {
                 id: microphone_id(&name),
                 is_default: default_input_name.as_deref() == Some(&name),
                 name: display_name,
-                subtitle: Some("Microphone · ALSA".to_string()),
+                subtitle: Some(microphone_subtitle().to_string()),
                 kind: "microphone".to_string(),
                 is_available: true,
             }
         });
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     for device in host
         .output_devices()
         .map_err(|error| AppError::Audio(format!("Could not list audio outputs: {error}")))?
@@ -846,7 +904,26 @@ pub fn list_devices() -> AppResult<Vec<AudioDevice>> {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    devices.push(AudioDevice {
+        id: "macos-system-audio".to_string(),
+        name: "System Audio".to_string(),
+        subtitle: Some("Calls and application audio".to_string()),
+        kind: "system".to_string(),
+        is_default: true,
+        is_available: true,
+    });
+
     Ok(devices)
+}
+
+fn microphone_subtitle() -> &'static str {
+    #[cfg(target_os = "linux")]
+    return "Microphone · ALSA";
+    #[cfg(target_os = "macos")]
+    return "Microphone · CoreAudio";
+    #[cfg(target_os = "windows")]
+    return "Microphone · WASAPI";
 }
 
 #[cfg(target_os = "linux")]
@@ -979,9 +1056,14 @@ fn system_id(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
-    use super::{visual_level_from_rms, RecordingClock};
+    use parking_lot::Mutex;
+
+    use super::{visual_level_from_rms, RecordingClock, SegmentWriter};
 
     #[test]
     fn meter_makes_conversational_audio_visible() {
@@ -1019,5 +1101,33 @@ mod tests {
         };
 
         assert!((2_900..=3_100).contains(&clock.elapsed_ms()));
+    }
+
+    #[test]
+    fn finalizes_a_writer_while_a_callback_reference_is_still_alive() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let writer = Arc::new(Mutex::new(
+            SegmentWriter::new(
+                directory.path().to_path_buf(),
+                "system-test".to_string(),
+                1_000,
+                1,
+            )
+            .expect("create writer"),
+        ));
+        let callback_writer = Arc::clone(&writer);
+        writer.lock().write_samples(&[100, -100]);
+
+        assert_eq!(writer.lock().finish().expect("finalize writer"), 2);
+        callback_writer.lock().write_samples(&[200, -200]);
+        assert_eq!(writer.lock().finish().expect("writer stays finalized"), 2);
+
+        let path = directory.path().join("system-test-0000.wav");
+        let samples = hound::WavReader::open(path)
+            .expect("open finalized recording")
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read finalized recording");
+        assert_eq!(samples, [100, -100]);
     }
 }

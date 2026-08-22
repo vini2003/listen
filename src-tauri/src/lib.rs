@@ -5,6 +5,8 @@ mod database;
 mod diagnostics;
 mod domain;
 mod error;
+#[cfg(target_os = "macos")]
+mod macos_system_audio;
 mod pyannote;
 mod speech_audio;
 mod transcript_cleanup;
@@ -12,7 +14,7 @@ mod transcription;
 mod voice_profile_store;
 mod voice_reference;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use audio::RecordingManager;
 use chrono::Utc;
@@ -572,6 +574,24 @@ pub fn run() {
             database
                 .recover_interrupted_voice_profiles()
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            for meeting in database
+                .meetings()
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?
+                .into_iter()
+                .filter(|meeting| meeting.status == "recording")
+            {
+                let saved_duration = meeting
+                    .audio_directory
+                    .as_deref()
+                    .and_then(|directory| {
+                        speech_audio::recording_duration_ms(Path::new(directory)).ok()
+                    })
+                    .unwrap_or_default()
+                    .max(meeting.duration_ms);
+                database
+                    .recover_interrupted_recording(&meeting.id, saved_duration)
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            }
             let voice_profiles = VoiceProfileStore::new(app_data_dir.join("voice-profiles"));
             for profile in database.voice_profiles().unwrap_or_default() {
                 let legacy = profile.voiceprint.or_else(|| {

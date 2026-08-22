@@ -8,6 +8,7 @@ Listen is a minimal, local-first desktop application for recording, organizing, 
 - Disk-backed microphone recording with bounded WAV segments; completed chunks survive an interrupted session
 - Simultaneous microphone and WASAPI loopback capture on Windows
 - PipeWire/PulseAudio monitor-source capture on Linux when exposed by the host
+- Native microphone and ScreenCaptureKit system-audio capture on macOS 13 or newer
 - SQLite persistence for projects, recordings, speakers, and transcript segments
 - Speaker profiles with automatic, source-isolated Precision-2 voiceprints
 - Speaker-attributed transcription through pyannoteAI `precision-2` with its default Parakeet STT model
@@ -18,7 +19,7 @@ Listen is a minimal, local-first desktop application for recording, organizing, 
 - Light, dark, and system themes
 - Tauri packaging configuration for Windows, macOS, and Linux
 
-Listen renders a normalized, streaming 16 kHz meeting file after recording stops and sends it to Precision-2 for diarization and transcription. When known voiceprints exist, a separate identification job runs in parallel and is joined to the transcript by time overlap rather than request-local speaker labels. A bounded Luna pass can then correct likely recognition mistakes and punctuation without changing timestamps or speaker identities. macOS system-audio capture still needs its ScreenCaptureKit adapter; microphone recording and the rest of the app are cross-platform today.
+Listen renders a normalized, streaming 16 kHz meeting file after recording stops and sends it to Precision-2 for diarization and transcription. When known voiceprints exist, a separate identification job runs in parallel and is joined to the transcript by time overlap rather than request-local speaker labels. A bounded Luna pass can then correct likely recognition mistakes and punctuation without changing timestamps or speaker identities. On macOS, system audio uses ScreenCaptureKit and requires permission under Privacy & Security > Screen & System Audio Recording.
 
 ## Development
 

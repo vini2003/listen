@@ -54,4 +54,4 @@ Keeping microphone and speaker audio as separate tracks avoids realtime resampli
 
 - Windows: CPAL/WASAPI microphone capture and output-device loopback.
 - Linux: CPAL microphone input plus a PipeWire/PulseAudio monitor source when the host exposes one.
-- macOS: microphone input works through CoreAudio; system audio needs a dedicated ScreenCaptureKit adapter and permission flow.
+- macOS: CPAL/CoreAudio microphone input plus a ScreenCaptureKit system-audio stream. The app exposes one virtual System Audio source rather than individual output devices, excludes its own process audio, and keeps the resulting track separate until normalization.

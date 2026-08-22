@@ -42,6 +42,9 @@
     "category": "Productivity",
     "shortDescription": "Record, organize, and transcribe conversations.",
     "longDescription": "Listen is a local-first meeting recorder with projects, speaker profiles, and Precision-2 transcription.",
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
     "linux": {
       "deb": {
         "depends": [
