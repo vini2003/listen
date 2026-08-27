@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default permissions for the Listen main window","local":true,"windows":["main"],"permissions":["core:default","dialog:default","opener:default","store:default"]}}
+{"default":{"identifier":"default","description":"Default permissions for the Listen main window","local":true,"windows":["main"],"permissions":["core:default","dialog:default","opener:default","store:default","updater:default","process:allow-restart"]}}

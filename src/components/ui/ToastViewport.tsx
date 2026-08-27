@@ -1,16 +1,18 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertCircle, X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { AppToast } from "../../store/workspace";
 
 interface ToastViewportProps {
   toasts: AppToast[];
   onDismiss: (id: number) => void;
+  children?: ReactNode;
 }
 
-export function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
+export function ToastViewport({ toasts, onDismiss, children }: ToastViewportProps) {
   return (
     <div className="toast-viewport" aria-live="assertive" aria-atomic="false">
+      {children}
       <AnimatePresence initial={false}>
         {toasts.map((toast) => (
           <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />

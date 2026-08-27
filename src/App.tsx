@@ -6,6 +6,7 @@ import { SettingsDialog } from "./components/dialogs/SettingsDialog";
 import { EmptyState } from "./components/EmptyState";
 import { MeetingView } from "./components/meeting/MeetingView";
 import { Sidebar } from "./components/sidebar/Sidebar";
+import { AppUpdater } from "./components/ui/AppUpdater";
 import { ToastViewport } from "./components/ui/ToastViewport";
 import { useWorkspace } from "./store/workspace";
 
@@ -98,7 +99,9 @@ export default function App() {
         )}
       </div>
 
-      <ToastViewport toasts={workspace.toasts} onDismiss={workspace.dismissToast} />
+      <ToastViewport toasts={workspace.toasts} onDismiss={workspace.dismissToast}>
+        <AppUpdater recording={workspace.meetings.some((meeting) => meeting.status === "recording")} />
+      </ToastViewport>
 
       <CreateProjectDialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
       <CreateMeetingDialog open={createMeetingOpen} initialProjectId={newMeetingProjectId} onClose={() => setCreateMeetingOpen(false)} />

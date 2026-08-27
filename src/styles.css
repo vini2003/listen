@@ -493,6 +493,22 @@ input:checked + .switch::after { transform: translateX(12px); }
 .error-toast > svg { flex: 0 0 auto; color: var(--danger); }
 .error-toast span { flex: 1; }
 .error-toast button { display: grid; place-items: center; padding: 3px; color: var(--text-faint); background: transparent; }
+.update-toast { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; position: relative; width: min(390px, 100%); padding: 12px 12px 12px 13px; color: var(--text-soft); background: color-mix(in srgb, var(--surface-raised) 97%, transparent); border: 1px solid color-mix(in srgb, #747db2 34%, var(--border)); border-radius: 12px; box-shadow: var(--shadow-lg); font-size: 12px; line-height: 1.4; pointer-events: auto; backdrop-filter: blur(18px); }
+.update-toast-icon { display: grid; place-items: center; align-self: start; width: 27px; height: 27px; color: #747db2; background: color-mix(in srgb, #747db2 13%, transparent); border-radius: 8px; }
+.update-toast-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.update-toast-copy strong { color: var(--text); font-size: 12.5px; font-weight: 650; }
+.update-toast-copy > span { color: var(--text-soft); font-size: 11px; }
+.update-toast-copy progress { overflow: hidden; width: 100%; height: 3px; margin-top: 5px; appearance: none; border: 0; border-radius: 999px; }
+.update-toast-copy progress::-webkit-progress-bar { background: var(--hover); }
+.update-toast-copy progress::-webkit-progress-value { background: #747db2; border-radius: 999px; }
+.update-toast-actions { display: flex; align-items: center; gap: 5px; }
+.update-toast-actions button { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 9px; color: var(--text-soft); background: var(--hover); border-radius: 7px; font-size: 10.5px; }
+.update-toast-actions button:hover:not(:disabled) { color: var(--text); background: var(--selected); }
+.update-toast-actions button.primary { color: var(--accent-text); background: var(--accent); }
+.update-toast-actions button:disabled { opacity: .5; cursor: default; }
+.update-toast-close { display: grid; place-items: center; position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0; color: var(--text-faint); background: transparent; border-radius: 6px; opacity: 0; }
+.update-toast:hover .update-toast-close, .update-toast:focus-within .update-toast-close { opacity: 1; }
+.update-spinner { animation: softSpin 850ms linear infinite; }
 .app-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-soft); background: var(--surface); }
 .brand-loading-mark { display: grid; place-items: center; width: 42px; height: 42px; color: var(--accent-text); background: var(--accent); border-radius: 12px; font-size: 18px; font-weight: 700; animation: breathe 1.5s ease-in-out infinite; }
 .app-loading p { margin-top: 11px; font-size: 10px; }

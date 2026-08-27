@@ -42,6 +42,15 @@ npm run dev
 
 The browser preview uses a local in-browser adapter with sample data. The packaged application always uses the Rust and SQLite services.
 
+## Distribution
+
+```sh
+npm run build:desktop  # native installers and updater artifacts
+npm run build:portable # raw executable for local development
+```
+
+Cross-platform releases are built and published through GitHub Actions. See [the release guide](docs/RELEASING.md) for updater signing, required repository secrets, versioning, and the release workflow.
+
 ## Verification
 
 ```sh
