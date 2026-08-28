@@ -26,9 +26,11 @@ jobs:
           - name: macOS Apple Silicon
             platform: macos-latest
             args: "--target aarch64-apple-darwin"
+            appPath: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Listen.app
           - name: macOS Intel
             platform: macos-latest
             args: "--target x86_64-apple-darwin"
+            appPath: src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Listen.app
 
     steps:
       - uses: actions/checkout@v7
@@ -63,7 +65,7 @@ jobs:
       - name: Test native core
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build and publish signed bundles
+      - name: Build and publish release bundles
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,3 +81,7 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+      - name: Verify macOS application signature
+        if: startsWith(matrix.platform, 'macos-')
+        run: codesign --verify --deep --strict --verbose=2 "${{ matrix.appPath }}"

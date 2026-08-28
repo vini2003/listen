@@ -11,13 +11,18 @@ The updater public key is committed in `src-tauri/tauri.conf.json`. The private 
 
 Never commit the private key. Back it up with the password: losing either prevents installed copies from trusting future releases.
 
+These keys sign Tauri updater artifacts. They do not sign the macOS application for Gatekeeper. macOS bundles use the ad-hoc identity configured in `src-tauri/tauri.conf.json`, and the release workflow verifies that the resulting application has a complete bundle signature. Without that explicit identity, cross-target builds can retain only the linker's partial signature, causing downloaded copies to be reported as damaged.
+
+Ad-hoc signing does not establish a verified developer identity or notarize the application. Users may still need to approve the first launch in System Settings. Warning-free distribution requires a Developer ID Application certificate and Apple notarization credentials; when those are available, replace the ad-hoc identity and configure them in the release workflow.
+
 ## Publish a release
 
 1. Update the same semantic version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then refresh both lockfiles.
 2. Commit and push the version change.
 3. Either run **Release Listen** from GitHub Actions or push a matching version tag such as `v0.2.0`.
 4. Wait for all four platform jobs to finish.
-5. Verify the GitHub Release contains installers, updater signatures, and `latest.json`.
+5. Verify all four jobs succeed. The macOS jobs run strict bundle-signature validation after packaging.
+6. Verify the GitHub Release contains installers, updater signatures, and `latest.json`.
 
 `latest.json` is served from:
 
