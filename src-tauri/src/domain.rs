@@ -195,6 +195,14 @@ pub struct WorkspaceSnapshot {
     pub settings: AppSettings,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantContext {
+    pub meeting: Meeting,
+    pub meetings: Vec<Meeting>,
+    pub settings: AppSettings,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingRequest {

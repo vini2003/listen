@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AssistantContext,
   AppSettings,
   ChatMessage,
   ChatScope,
@@ -26,6 +27,7 @@ export interface RecordingRequest {
 
 export interface DesktopService {
   loadWorkspace(): Promise<WorkspaceSnapshot>;
+  loadAssistantContext(meetingId: string): Promise<AssistantContext>;
   loadMeetingSegments(meetingId: string): Promise<TranscriptSegment[]>;
   findVoiceEnrollmentSegment(personId: string): Promise<TranscriptSegment | null>;
   createProject(draft: ProjectDraft): Promise<Project>;
@@ -66,6 +68,7 @@ const personColors = ["#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b"];
 
 const tauriService: DesktopService = {
   loadWorkspace: () => invoke("load_workspace"),
+  loadAssistantContext: (meetingId) => invoke("load_assistant_context", { meetingId }),
   loadMeetingSegments: (meetingId) => invoke("load_meeting_segments", { meetingId }),
   findVoiceEnrollmentSegment: (personId) => invoke("find_voice_enrollment_segment", { personId }),
   createProject: (draft) => invoke("create_project", { draft }),
@@ -140,6 +143,15 @@ function createBrowserPreviewService(): DesktopService {
   return {
     async loadWorkspace() {
       return { ...structuredClone(snapshot), segments: [] };
+    },
+    async loadAssistantContext(meetingId) {
+      const meeting = snapshot.meetings.find((candidate) => candidate.id === meetingId);
+      if (!meeting) throw new Error("Meeting not found");
+      return {
+        meeting: structuredClone(meeting),
+        meetings: structuredClone(snapshot.meetings),
+        settings: structuredClone(snapshot.settings),
+      };
     },
     async loadMeetingSegments(meetingId) {
       return structuredClone(snapshot.segments.filter((segment) => segment.meetingId === meetingId));

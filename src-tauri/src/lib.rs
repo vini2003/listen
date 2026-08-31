@@ -21,12 +21,14 @@ use chrono::Utc;
 use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
-    AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
-    Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
+    AppSettings, AssistantContext, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person,
+    PersonDraft, Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
     WorkspaceSnapshot, PRIVACY_NOTICE_VERSION,
 };
 use error::{AppError, AppResult};
-use tauri::{Manager, State};
+use parking_lot::Mutex;
+use serde::Serialize;
+use tauri::{Emitter, Manager, State};
 use voice_profile_store::VoiceProfileStore;
 
 struct AppState {
@@ -34,6 +36,21 @@ struct AppState {
     recordings_directory: PathBuf,
     diagnostics: Diagnostics,
     voice_profiles: VoiceProfileStore,
+    assistant_meeting_id: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistantReferenceEvent {
+    meeting_id: String,
+    time_ms: i64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatUpdatedEvent {
+    scope_type: String,
+    scope_id: String,
 }
 
 #[tauri::command]
@@ -77,6 +94,136 @@ fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
         devices,
         settings,
     })
+}
+
+#[tauri::command]
+fn load_assistant_context(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<AssistantContext> {
+    let mut settings = state.database.settings()?;
+    settings.api_key_configured = credentials::has_openai_key()?;
+    settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
+    Ok(AssistantContext {
+        meeting: state.database.meeting(&meeting_id)?,
+        meetings: state.database.meetings()?,
+        settings,
+    })
+}
+
+#[tauri::command]
+async fn open_assistant_window(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<()> {
+    let meeting = state.database.meeting(&meeting_id)?;
+
+    if let Some(window) = app.get_webview_window("assistant") {
+        navigate_assistant_window(&window, &meeting_id, &meeting.title)?;
+        *state.assistant_meeting_id.lock() = Some(meeting_id);
+        return Ok(());
+    }
+
+    let url =
+        tauri::WebviewUrl::App(format!("index.html?view=assistant&meetingId={meeting_id}").into());
+    if let Err(error) = tauri::WebviewWindowBuilder::new(&app, "assistant", url)
+        .title(format!("Ask — {}", meeting.title))
+        .inner_size(480.0, 700.0)
+        .min_inner_size(360.0, 460.0)
+        .resizable(true)
+        .prevent_overflow()
+        .center()
+        .build()
+    {
+        if let Some(window) = app.get_webview_window("assistant") {
+            navigate_assistant_window(&window, &meeting_id, &meeting.title)?;
+            *state.assistant_meeting_id.lock() = Some(meeting_id);
+            return Ok(());
+        }
+        *state.assistant_meeting_id.lock() = None;
+        return Err(AppError::Window(error.to_string()));
+    }
+    *state.assistant_meeting_id.lock() = Some(meeting_id);
+    Ok(())
+}
+
+fn navigate_assistant_window(
+    window: &tauri::WebviewWindow,
+    meeting_id: &str,
+    meeting_title: &str,
+) -> AppResult<()> {
+    window
+        .set_title(&format!("Ask — {meeting_title}"))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    window
+        .emit("listen://assistant-navigate", meeting_id)
+        .map_err(|error| AppError::Window(error.to_string()))
+}
+
+#[tauri::command]
+fn attached_assistant_meeting(state: State<'_, AppState>) -> Option<String> {
+    state.assistant_meeting_id.lock().clone()
+}
+
+#[tauri::command]
+fn focus_assistant_window(app: tauri::AppHandle) -> AppResult<bool> {
+    let Some(window) = app.get_webview_window("assistant") else {
+        return Ok(false);
+    };
+    window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn attach_assistant_window(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<()> {
+    state.database.meeting(&meeting_id)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or(AppError::NotFound("Main window"))?;
+    main.show()
+        .and_then(|_| main.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    main.emit("listen://assistant-attached", meeting_id)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    *state.assistant_meeting_id.lock() = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn focus_main_window_reference(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+    time_ms: i64,
+) -> AppResult<()> {
+    state.database.meeting(&meeting_id)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or(AppError::NotFound("Main window"))?;
+    main.show()
+        .and_then(|_| main.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    main.emit(
+        "listen://assistant-reference",
+        AssistantReferenceEvent {
+            meeting_id,
+            time_ms,
+        },
+    )
+    .map_err(|error| AppError::Window(error.to_string()))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -143,8 +290,22 @@ fn reorder_meetings(
 }
 
 #[tauri::command]
-fn delete_meeting(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    state.database.delete_meeting(&id)
+fn delete_meeting(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.database.delete_meeting(&id)?;
+    let close_assistant = {
+        let mut assistant_meeting_id = state.assistant_meeting_id.lock();
+        let matches = assistant_meeting_id.as_deref() == Some(id.as_str());
+        if matches {
+            *assistant_meeting_id = None;
+        }
+        matches
+    };
+    if close_assistant {
+        if let Some(window) = app.get_webview_window("assistant") {
+            let _ = window.close();
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -486,6 +647,8 @@ fn load_chat_messages(
 
 #[tauri::command]
 async fn complete_chat(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     scope_type: String,
     scope_id: String,
@@ -506,6 +669,7 @@ async fn complete_chat(
         message_id.as_deref(),
         client_message_id.as_deref(),
     )?;
+    notify_other_chat_window(&app, window.label(), &scope_type, &scope_id);
     let answer = match ai_chat::answer(&state.database, &api_key, &scope_type, &scope_id).await {
         Ok(answer) => answer,
         Err(error) => {
@@ -521,7 +685,30 @@ async fn complete_chat(
     state
         .database
         .append_chat_assistant_message(&scope_type, &scope_id, answer)?;
-    state.database.chat_messages(&scope_type, &scope_id)
+    let messages = state.database.chat_messages(&scope_type, &scope_id)?;
+    notify_other_chat_window(&app, window.label(), &scope_type, &scope_id);
+    Ok(messages)
+}
+
+fn notify_other_chat_window(
+    app: &tauri::AppHandle,
+    source_window: &str,
+    scope_type: &str,
+    scope_id: &str,
+) {
+    let target = if source_window == "assistant" {
+        "main"
+    } else {
+        "assistant"
+    };
+    let _ = app.emit_to(
+        target,
+        "listen://chat-updated",
+        ChatUpdatedEvent {
+            scope_type: scope_type.to_string(),
+            scope_id: scope_id.to_string(),
+        },
+    );
 }
 
 async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Meeting> {
@@ -629,12 +816,35 @@ pub fn run() {
                 recordings_directory: app_data_dir.join("recordings"),
                 diagnostics: Diagnostics::new(&app_data_dir),
                 voice_profiles,
+                assistant_meeting_id: Mutex::new(None),
             });
             app.manage(RecordingManager::default());
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+            if window.label() == "main" {
+                if let Some(assistant) = window.app_handle().get_webview_window("assistant") {
+                    let _ = assistant.close();
+                }
+            } else if window.label() == "assistant" {
+                let state = window.state::<AppState>();
+                *state.assistant_meeting_id.lock() = None;
+                let _ = window
+                    .app_handle()
+                    .emit_to("main", "listen://assistant-closed", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             load_workspace,
+            load_assistant_context,
+            open_assistant_window,
+            attached_assistant_meeting,
+            focus_assistant_window,
+            attach_assistant_window,
+            focus_main_window_reference,
             load_meeting_segments,
             find_voice_enrollment_segment,
             create_project,

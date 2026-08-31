@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "assistant",
+  "description": "Minimal event permissions for the detached assistant window",
+  "windows": ["assistant"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-close"
+  ]
+}

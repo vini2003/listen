@@ -4,7 +4,9 @@ import {
   ChevronUp,
   Copy,
   LoaderCircle,
+  PanelRightClose,
   Pencil,
+  PictureInPicture2,
   RotateCcw,
   Send,
   Sparkles,
@@ -25,21 +27,44 @@ import {
 } from "react";
 import type { ChatMessage, ChatScope, Meeting } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
+import { readAssistantDraft, writeAssistantDraft } from "../../lib/assistantDraft";
 import { parseRecordingHref, renderableChatContent } from "../../lib/chatReferences";
 import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
+import { focusTranscriptTime } from "../../lib/transcriptFocus";
+import {
+  ASSISTANT_ATTACHED_EVENT,
+  ASSISTANT_CLOSED_EVENT,
+  CHAT_UPDATED_EVENT,
+  attachAssistantWindow,
+  attachedAssistantMeeting,
+  focusAssistantWindow,
+  isMatchingChatScope,
+  listenForAssistantEvent,
+  openAssistantWindow,
+  type AssistantReference,
+} from "../../services/assistantWindow";
 import { useWorkspace } from "../../store/workspace";
 
 interface MeetingChatProps {
   meeting: Meeting;
-  widePanelWidth: number;
-  onWidePanelWidthChange: (width: number) => void;
-  onWidePanelResizeEnd: (width: number) => void;
+  widePanelWidth?: number;
+  onWidePanelWidthChange?: (width: number) => void;
+  onWidePanelResizeEnd?: (width: number) => void;
+  mode?: "embedded" | "detached";
+  onOpenRecordingReference?: (reference: AssistantReference) => void;
 }
 
 const ReactMarkdown = lazy(() => import("react-markdown"));
 const DEFAULT_PANEL_HEIGHT = 360;
 
-export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, onWidePanelResizeEnd }: MeetingChatProps) {
+export function MeetingChat({
+  meeting,
+  widePanelWidth = 430,
+  onWidePanelWidthChange = () => {},
+  onWidePanelResizeEnd = () => {},
+  mode = "embedded",
+  onOpenRecordingReference,
+}: MeetingChatProps) {
   const {
     settings,
     meetings,
@@ -50,10 +75,14 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
     loadChat,
     completeChat,
   } = useWorkspace();
-  const wideLayout = useWideChatLayout();
+  const responsiveWideLayout = useWideChatLayout();
+  const wideLayout = mode === "embedded" && responsiveWideLayout;
   const [expanded, setExpanded] = useState(false);
+  const [detachedToWindow, setDetachedToWindow] = useState(false);
+  const [windowActionBusy, setWindowActionBusy] = useState(false);
+  const [windowError, setWindowError] = useState<string | null>(null);
   const [panelHeight, setPanelHeight] = useState(readPanelHeight);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => readAssistantDraft(meeting.id));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -61,8 +90,8 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
   const scrollRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const wideResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | null>(null);
-  const panelVisible = expanded || wideLayout;
-  const chatRef = useDismissableLayer<HTMLElement>(expanded && !wideLayout, () => setExpanded(false));
+  const panelVisible = mode === "detached" || (!detachedToWindow && (expanded || wideLayout));
+  const chatRef = useDismissableLayer<HTMLElement>(mode === "embedded" && expanded && !wideLayout, () => setExpanded(false));
   const scope = useMemo<ChatScope>(() => ({
     scopeType: "meeting",
     scopeId: meeting.id,
@@ -70,13 +99,65 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
 
   useEffect(() => {
     setExpanded(false);
-    setDraft("");
+    setDraft(readAssistantDraft(meeting.id));
     setEditingId(null);
+    setWindowError(null);
   }, [meeting.id]);
+
+  useEffect(() => {
+    writeAssistantDraft(meeting.id, draft);
+  }, [draft, meeting.id]);
 
   useEffect(() => {
     void loadChat(scope);
   }, [loadChat, scope.scopeId, scope.scopeType]);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup = (): void => {};
+    void listenForAssistantEvent<ChatScope>(CHAT_UPDATED_EVENT, (payload) => {
+      if (isMatchingChatScope(payload, scope)) void loadChat(scope);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else cleanup = unlisten;
+    });
+    return () => {
+      disposed = true;
+      cleanup();
+    };
+  }, [loadChat, scope.scopeId, scope.scopeType]);
+
+  useEffect(() => {
+    if (mode !== "embedded") return;
+    let disposed = false;
+    const cleanups: Array<() => void> = [];
+    void attachedAssistantMeeting().then((meetingId) => {
+      if (!disposed) setDetachedToWindow(meetingId === meeting.id);
+    });
+    for (const [eventName, handler] of [
+      [ASSISTANT_ATTACHED_EVENT, (meetingId: string) => {
+        if (meetingId !== meeting.id) return;
+        setDetachedToWindow(false);
+        setDraft(readAssistantDraft(meeting.id));
+        setExpanded(true);
+        void loadChat(scope);
+      }],
+      [ASSISTANT_CLOSED_EVENT, () => {
+        setDetachedToWindow(false);
+        setDraft(readAssistantDraft(meeting.id));
+        void loadChat(scope);
+      }],
+    ] as const) {
+      void listenForAssistantEvent(eventName, handler).then((unlisten) => {
+        if (disposed) unlisten();
+        else cleanups.push(unlisten);
+      });
+    }
+    return () => {
+      disposed = true;
+      cleanups.forEach((cleanup) => cleanup());
+    };
+  }, [loadChat, meeting.id, mode, scope.scopeId, scope.scopeType]);
 
   useEffect(() => {
     if (!panelVisible) return;
@@ -115,6 +196,45 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
     window.setTimeout(() => setCopiedId((current) => current === message.id ? null : current), 1_400);
   }
 
+  async function detachConversation(): Promise<void> {
+    if (chatBusy || editingId || windowActionBusy) return;
+    setWindowActionBusy(true);
+    setWindowError(null);
+    try {
+      await openAssistantWindow(meeting.id);
+      if ("__TAURI_INTERNALS__" in window) {
+        setDetachedToWindow(true);
+        setExpanded(false);
+      }
+    } catch {
+      setWindowError("The assistant window could not be opened.");
+    } finally {
+      setWindowActionBusy(false);
+    }
+  }
+
+  async function attachConversation(): Promise<void> {
+    if (chatBusy || editingId || windowActionBusy) return;
+    setWindowActionBusy(true);
+    setWindowError(null);
+    try {
+      await attachAssistantWindow(meeting.id);
+    } catch {
+      setWindowError("The assistant could not be returned to the main window.");
+      setWindowActionBusy(false);
+    }
+  }
+
+  async function showDetachedConversation(): Promise<void> {
+    setWindowError(null);
+    try {
+      if (!await focusAssistantWindow()) await openAssistantWindow(meeting.id);
+    } catch {
+      setDetachedToWindow(false);
+      setWindowError("The assistant window is no longer available.");
+    }
+  }
+
   function beginResize(event: ReactPointerEvent<HTMLDivElement>): void {
     event.preventDefault();
     resizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: panelHeight };
@@ -133,6 +253,19 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
     resizeRef.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
     try { window.localStorage.setItem("listen.askPanelHeight", String(panelHeight)); } catch { /* Optional preference. */ }
+  }
+
+  function resizePanelWithKeyboard(event: KeyboardEvent<HTMLDivElement>): void {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const maximum = Math.max(240, window.innerHeight - 205);
+    const height = event.key === "Home"
+      ? 220
+      : event.key === "End"
+        ? maximum
+        : Math.max(220, Math.min(maximum, panelHeight + (event.key === "ArrowUp" ? 24 : -24)));
+    setPanelHeight(height);
+    try { window.localStorage.setItem("listen.askPanelHeight", String(height)); } catch { /* Optional preference. */ }
   }
 
   function beginWideResize(event: ReactPointerEvent<HTMLDivElement>): void {
@@ -184,16 +317,41 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
   }
 
   function openRecordingReference(meetingId: string, timeMs: number): void {
+    if (onOpenRecordingReference) {
+      onOpenRecordingReference({ meetingId, timeMs });
+      return;
+    }
     if (!meetings.some((candidate) => candidate.id === meetingId)) return;
     selectMeeting(meetingId);
     window.setTimeout(() => focusTranscriptTime(meetingId, timeMs), 60);
   }
 
+  if (mode === "embedded" && detachedToWindow) {
+    return (
+      <section className="meeting-chat detached-placeholder" aria-label="Detached assistant">
+        <button
+          type="button"
+          data-ask-composer
+          className="detached-placeholder-button"
+          onClick={() => void showDetachedConversation()}
+          title="Show the detached Ask window"
+        >
+          <span className="detached-placeholder-icon"><PictureInPicture2 size={16} /></span>
+          <span>
+            <strong>Ask is in its own window</strong>
+            <small>{windowError ?? "Click to bring it forward"}</small>
+          </span>
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section
       ref={chatRef}
-      className={`meeting-chat ${panelVisible ? "expanded" : "collapsed"} ${wideLayout ? "wide" : ""}`}
+      className={`meeting-chat ${panelVisible ? "expanded" : "collapsed"} ${wideLayout ? "wide" : ""} ${mode === "detached" ? "detached" : ""}`}
       style={{ "--chat-panel-height": `${panelHeight}px` } as CSSProperties}
+      aria-label={`Ask about ${meeting.title}`}
     >
       {wideLayout ? (
         <div
@@ -222,24 +380,65 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
             exit={{ opacity: 0, y: 5 }}
             transition={{ duration: 0.17 }}
           >
-            {!wideLayout ? (
+            {mode === "embedded" && !wideLayout ? (
               <div
                 className="chat-resize-handle"
                 role="separator"
                 aria-label="Resize Ask panel"
                 aria-orientation="horizontal"
+                aria-valuemin={220}
+                aria-valuemax={Math.max(240, window.innerHeight - 205)}
+                aria-valuenow={Math.round(panelHeight)}
+                tabIndex={0}
                 onDoubleClick={() => setPanelHeight(DEFAULT_PANEL_HEIGHT)}
+                onKeyDown={resizePanelWithKeyboard}
                 onPointerDown={beginResize}
                 onPointerMove={resizePanel}
                 onPointerUp={finishResize}
                 onPointerCancel={finishResize}
               ><span /></div>
             ) : null}
-            {!wideLayout ? (
-              <button className="chat-close-button" onClick={() => setExpanded(false)} aria-label="Close Ask">
-                <X size={14} />
-              </button>
-            ) : null}
+            <header className="meeting-chat-header">
+              <div className="meeting-chat-heading">
+                <span className="meeting-chat-mark"><Sparkles size={14} /></span>
+                <span>
+                  <strong>Ask</strong>
+                  <small>{meeting.title}</small>
+                </span>
+              </div>
+              <div className="meeting-chat-window-actions">
+                {mode === "detached" ? (
+                  <button
+                    className="chat-window-action"
+                    onClick={() => void attachConversation()}
+                    disabled={chatBusy || editingId !== null || windowActionBusy}
+                    aria-label="Return Ask to the main window"
+                    title={editingId ? "Finish editing before returning to the main window" : "Return to main window"}
+                  >
+                    <PanelRightClose size={15} />
+                    <span>Reattach</span>
+                  </button>
+                ) : (
+                  <button
+                    className="chat-window-action"
+                    onClick={() => void detachConversation()}
+                    disabled={chatBusy || editingId !== null || windowActionBusy}
+                    aria-label="Open Ask in a separate window"
+                    title={chatBusy ? "Wait for the current answer to finish" : "Open in separate window"}
+                  >
+                    <PictureInPicture2 size={15} />
+                    <span>Detach</span>
+                  </button>
+                )}
+                {mode === "embedded" && !wideLayout ? (
+                  <button className="chat-close-button" onClick={() => setExpanded(false)} aria-label="Close Ask" title="Close Ask">
+                    <X size={14} />
+                  </button>
+                ) : null}
+              </div>
+            </header>
+
+            {windowError ? <div className="chat-window-error" role="status">{windowError}</div> : null}
 
             <div className="meeting-chat-messages" ref={scrollRef}>
               {chatLoading ? (
@@ -309,7 +508,7 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
               )}
               <AnimatePresence initial={false}>
                 {chatBusy ? (
-                  <motion.div className="chat-thinking" initial={{ opacity: 0, y: 5, scale: .94 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 3, scale: .96 }} transition={{ duration: .16 }}><span /><span /><span /></motion.div>
+                  <motion.div className="chat-thinking" role="status" aria-label="Assistant is thinking" initial={{ opacity: 0, y: 5, scale: .94 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 3, scale: .96 }} transition={{ duration: .16 }}><span className="chat-thinking-dot" /><span className="chat-thinking-dot" /><span className="chat-thinking-dot" /></motion.div>
                 ) : null}
               </AnimatePresence>
             </div>
@@ -318,7 +517,7 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
       </AnimatePresence>
 
       <div className="meeting-chat-composer">
-        {!wideLayout ? (
+        {mode === "embedded" && !wideLayout ? (
           <button
             className="chat-expand-button"
             onClick={() => setExpanded((current) => !current)}
@@ -335,6 +534,7 @@ export function MeetingChat({ meeting, widePanelWidth, onWidePanelWidthChange, o
           rows={1}
           maxLength={12_000}
           value={draft}
+          autoFocus={mode === "detached"}
           placeholder={settings.apiKeyConfigured
             ? "Ask about this meeting…"
             : "Add a text model API key in Settings…"}
@@ -379,22 +579,6 @@ function ChatLink({ href, children, onOpenRecording, ...props }: ComponentPropsW
       <span>{children}</span>
     </a>
   );
-}
-
-function focusTranscriptTime(meetingId: string, timeMs: number): void {
-  const rows = [...document.querySelectorAll<HTMLElement>(
-    `[data-meeting-id="${CSS.escape(meetingId)}"][data-transcript-start-ms]`,
-  )];
-  const target = rows.reduce<HTMLElement | null>((nearest, row) => {
-    if (!nearest) return row;
-    const rowDistance = Math.abs(Number(row.dataset.transcriptStartMs) - timeMs);
-    const nearestDistance = Math.abs(Number(nearest.dataset.transcriptStartMs) - timeMs);
-    return rowDistance < nearestDistance ? row : nearest;
-  }, null);
-  if (!target) return;
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
-  target.classList.add("reference-target");
-  window.setTimeout(() => target.classList.remove("reference-target"), 1_500);
 }
 
 function previousUserMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage | null {

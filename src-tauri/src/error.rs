@@ -21,6 +21,9 @@ pub enum AppError {
     #[error("File error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Window error: {0}")]
+    Window(String),
+
     #[error("Invalid request: {0}")]
     Validation(String),
 

@@ -125,6 +125,12 @@ export interface WorkspaceSnapshot {
   settings: AppSettings;
 }
 
+export interface AssistantContext {
+  meeting: Meeting;
+  meetings: Meeting[];
+  settings: AppSettings;
+}
+
 export interface ProjectDraft {
   name: string;
 }
