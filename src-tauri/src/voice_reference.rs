@@ -71,11 +71,7 @@ pub async fn learn_from_assignment(
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Validation("This recording has no saved audio".to_string()))?;
     let speaker_segments = database.speaker_segments(meeting_id, speaker_label)?;
-    let all_segments = database
-        .segments()?
-        .into_iter()
-        .filter(|segment| segment.meeting_id == meeting_id)
-        .collect::<Vec<_>>();
+    let all_segments = database.segments_for_meeting(meeting_id)?;
     let excluded_ranges = read_overlap_metadata(&directory);
     let candidate = best_reference_candidate(
         &directory,

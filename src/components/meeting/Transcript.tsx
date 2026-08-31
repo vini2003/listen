@@ -50,7 +50,7 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
 
   useEffect(() => {
     return () => {
-      audioRef.current?.pause();
+      disposeAudio(audioRef.current);
       audioRef.current = null;
     };
   }, [meeting.id]);
@@ -63,7 +63,7 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
       return;
     }
 
-    currentAudio?.pause();
+    disposeAudio(currentAudio);
     audioRef.current = null;
     setPlayingAudioId(null);
     setLoadingAudioId(segment.id);
@@ -81,7 +81,7 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
       await audio.play();
       if (audioRef.current === audio) setPlayingAudioId(segment.id);
     } catch {
-      audioRef.current?.pause();
+      disposeAudio(audioRef.current);
       audioRef.current = null;
       setPlayingAudioId(null);
     } finally {
@@ -97,7 +97,7 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
 
   async function deleteTurn(segment: TranscriptTurn): Promise<void> {
     if (playingAudioId === segment.id) {
-      audioRef.current?.pause();
+      disposeAudio(audioRef.current);
       audioRef.current = null;
       setPlayingAudioId(null);
     }
@@ -158,6 +158,15 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
       ))}
     </div>
   );
+}
+
+function disposeAudio(audio: HTMLAudioElement | null): void {
+  if (!audio) return;
+  audio.pause();
+  audio.onended = null;
+  audio.onerror = null;
+  audio.removeAttribute("src");
+  audio.load();
 }
 
 interface TranscriptRowProps {

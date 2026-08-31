@@ -11,6 +11,7 @@ import type {
   Project,
   ProjectDraft,
   RecordingLevels,
+  TranscriptSegment,
   TranscriptSegmentBackup,
   WorkspaceSnapshot,
 } from "../domain/models";
@@ -25,6 +26,8 @@ export interface RecordingRequest {
 
 export interface DesktopService {
   loadWorkspace(): Promise<WorkspaceSnapshot>;
+  loadMeetingSegments(meetingId: string): Promise<TranscriptSegment[]>;
+  findVoiceEnrollmentSegment(personId: string): Promise<TranscriptSegment | null>;
   createProject(draft: ProjectDraft): Promise<Project>;
   renameProject(id: string, name: string): Promise<Project>;
   deleteProject(id: string): Promise<void>;
@@ -63,6 +66,8 @@ const personColors = ["#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b"];
 
 const tauriService: DesktopService = {
   loadWorkspace: () => invoke("load_workspace"),
+  loadMeetingSegments: (meetingId) => invoke("load_meeting_segments", { meetingId }),
+  findVoiceEnrollmentSegment: (personId) => invoke("find_voice_enrollment_segment", { personId }),
   createProject: (draft) => invoke("create_project", { draft }),
   renameProject: (id, name) => invoke("rename_project", { id, name }),
   deleteProject: (id) => invoke("delete_project", { id }),
@@ -134,7 +139,15 @@ function createBrowserPreviewService(): DesktopService {
 
   return {
     async loadWorkspace() {
-      return structuredClone(snapshot);
+      return { ...structuredClone(snapshot), segments: [] };
+    },
+    async loadMeetingSegments(meetingId) {
+      return structuredClone(snapshot.segments.filter((segment) => segment.meetingId === meetingId));
+    },
+    async findVoiceEnrollmentSegment(personId) {
+      return structuredClone(snapshot.segments
+        .filter((segment) => segment.personId === personId)
+        .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0] ?? null);
     },
     async createProject(draft) {
       const project: Project = {

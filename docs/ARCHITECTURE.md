@@ -42,6 +42,10 @@ Keeping microphone and speaker audio as separate tracks avoids realtime resampli
 ## Long-running reliability
 
 - No meeting-length audio buffer exists in memory.
+- The workspace snapshot contains projects, recordings, people, devices, and settings; transcript segments are loaded only for the selected recording.
+- UI mutations apply their returned records locally instead of repeatedly reloading the whole SQLite workspace and rediscovering audio devices.
+- Static PNG/JPEG profile photos are stored and rendered as bounded thumbnails. Existing full-resolution photos are retained in a private migration column until the user replaces or removes them; animated or vector formats remain unchanged.
+- Segment playback explicitly releases its generated audio source when playback changes, the turn is deleted, or the meeting view closes.
 - Normalized uploads are streamed from disk and practical multi-hour meetings remain far below pyannote's 1 GiB media limit.
 - SQLite uses WAL mode and a busy timeout.
 - Audio callbacks do minimal conversion and sequential writes.

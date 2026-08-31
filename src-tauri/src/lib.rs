@@ -73,10 +73,26 @@ fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
         projects: state.database.projects()?,
         meetings: state.database.meetings()?,
         people: state.database.people()?,
-        segments: state.database.segments()?,
+        segments: Vec::new(),
         devices,
         settings,
     })
+}
+
+#[tauri::command]
+fn load_meeting_segments(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<Vec<domain::TranscriptSegment>> {
+    state.database.segments_for_meeting(&meeting_id)
+}
+
+#[tauri::command]
+fn find_voice_enrollment_segment(
+    state: State<'_, AppState>,
+    person_id: String,
+) -> AppResult<Option<domain::TranscriptSegment>> {
+    state.database.best_assigned_segment_for_person(&person_id)
 }
 
 #[tauri::command]
@@ -566,9 +582,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let database = Database::open(app_data_dir.clone())
@@ -622,6 +635,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_workspace,
+            load_meeting_segments,
+            find_voice_enrollment_segment,
             create_project,
             rename_project,
             delete_project,

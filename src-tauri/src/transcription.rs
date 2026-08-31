@@ -189,11 +189,7 @@ pub async fn transcribe_meeting(
         .collect::<Vec<_>>();
     transcribed_speakers.sort();
 
-    let existing_segments = database
-        .segments()?
-        .into_iter()
-        .filter(|segment| segment.meeting_id == meeting_id)
-        .collect::<Vec<_>>();
+    let existing_segments = database.segments_for_meeting(meeting_id)?;
     let valid_person_ids = people
         .iter()
         .map(|person| person.id.clone())
@@ -365,8 +361,8 @@ fn identification_candidate_ids(
         })
         .map(|candidate| candidate.id)
         .collect::<HashSet<_>>();
-    for segment in database.segments()? {
-        if related_meeting_ids.contains(&segment.meeting_id) {
+    for related_meeting_id in related_meeting_ids {
+        for segment in database.segments_for_meeting(&related_meeting_id)? {
             if let Some(person_id) = segment.person_id {
                 candidates.insert(person_id);
             }

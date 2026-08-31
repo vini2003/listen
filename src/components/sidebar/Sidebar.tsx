@@ -150,15 +150,17 @@ export function Sidebar({
         window.requestAnimationFrame(() => contextTriggerRef.current?.focus());
       }
     }
-    window.addEventListener("pointerdown", dismiss, true);
-    window.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("blur", () => {
+    function closeOnBlur(): void {
       setContextMenu(null);
       setProjectContextMenu(null);
-    }, { once: true });
+    }
+    window.addEventListener("pointerdown", dismiss, true);
+    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("blur", closeOnBlur, { once: true });
     return () => {
       window.removeEventListener("pointerdown", dismiss, true);
       window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("blur", closeOnBlur);
     };
   }, [contextMenu, projectContextMenu]);
 

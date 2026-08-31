@@ -1,6 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::Cursor, path::PathBuf};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
+use image::{ImageFormat, ImageReader};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -17,6 +19,7 @@ const PERSON_COLORS: [&str; 6] = [
     "#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b", "#985b76",
 ];
 const MAX_CHAT_MESSAGE_CHARACTERS: usize = 12_000;
+const MAX_AVATAR_EDGE: u32 = 256;
 
 #[derive(Clone)]
 pub struct Database {
@@ -30,6 +33,7 @@ impl Database {
             path: app_data_dir.join("listen.sqlite3"),
         };
         database.migrate()?;
+        database.optimize_person_photos()?;
         Ok(database)
     }
 
@@ -73,6 +77,7 @@ impl Database {
                 full_name TEXT NOT NULL,
                 nickname TEXT,
                 photo_data_url TEXT,
+                photo_original_data_url TEXT,
                 reference_audio_data_url TEXT,
                 color TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -131,7 +136,60 @@ impl Database {
         self.ensure_transcript_raw_text_column()?;
         self.ensure_transcript_identity_columns()?;
         self.ensure_meeting_organization_columns()?;
+        self.ensure_person_photo_columns()?;
         self.migrate_legacy_voice_profiles()?;
+        Ok(())
+    }
+
+    fn ensure_person_photo_columns(&self) -> AppResult<()> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("PRAGMA table_info(people)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns
+            .iter()
+            .any(|column| column == "photo_original_data_url")
+        {
+            connection.execute(
+                "ALTER TABLE people ADD COLUMN photo_original_data_url TEXT",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn optimize_person_photos(&self) -> AppResult<()> {
+        let mut connection = self.connection()?;
+        let photos = {
+            let mut statement = connection.prepare(
+                "SELECT id, photo_data_url
+                 FROM people
+                 WHERE photo_data_url LIKE 'data:image/png;base64,%'
+                    OR photo_data_url LIKE 'data:image/jpeg;base64,%'
+                    OR photo_data_url LIKE 'data:image/jpg;base64,%'",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let transaction = connection.transaction()?;
+        for (person_id, photo) in photos {
+            let Some(thumbnail) = thumbnail_photo_data_url(&photo) else {
+                continue;
+            };
+            transaction.execute(
+                "UPDATE people
+                 SET photo_original_data_url = COALESCE(photo_original_data_url, photo_data_url),
+                     photo_data_url = ?1
+                 WHERE id = ?2",
+                params![thumbnail, person_id],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -321,20 +379,42 @@ impl Database {
              WHERE meeting.deleted_at IS NULL
              ORDER BY segment.meeting_id, segment.start_ms",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(TranscriptSegment {
-                id: row.get(0)?,
-                meeting_id: row.get(1)?,
-                speaker_label: row.get(2)?,
-                person_id: row.get(3)?,
-                identity_source: row.get(4)?,
-                identity_confidence: row.get(5)?,
-                start_ms: row.get(6)?,
-                end_ms: row.get(7)?,
-                text: row.get(8)?,
-            })
-        })?;
+        let rows = statement.query_map([], map_transcript_segment)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn segments_for_meeting(&self, meeting_id: &str) -> AppResult<Vec<TranscriptSegment>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, meeting_id, speaker_label, person_id, identity_source,
+                    identity_confidence, start_ms, end_ms, text
+             FROM transcript_segments
+             WHERE meeting_id = ?1
+             ORDER BY start_ms",
+        )?;
+        let rows = statement.query_map([meeting_id], map_transcript_segment)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn best_assigned_segment_for_person(
+        &self,
+        person_id: &str,
+    ) -> AppResult<Option<TranscriptSegment>> {
+        self.connection()?
+            .query_row(
+                "SELECT segment.id, segment.meeting_id, segment.speaker_label, segment.person_id,
+                        segment.identity_source, segment.identity_confidence,
+                        segment.start_ms, segment.end_ms, segment.text
+                 FROM transcript_segments segment
+                 JOIN meetings meeting ON meeting.id = segment.meeting_id
+                 WHERE segment.person_id = ?1 AND meeting.deleted_at IS NULL
+                 ORDER BY segment.end_ms - segment.start_ms DESC, segment.start_ms
+                 LIMIT 1",
+                [person_id],
+                map_transcript_segment,
+            )
+            .optional()
+            .map_err(AppError::from)
     }
 
     pub fn settings(&self) -> AppResult<AppSettings> {
@@ -555,7 +635,14 @@ impl Database {
 
     pub fn update_person(&self, id: &str, draft: PersonDraft) -> AppResult<Person> {
         self.connection()?.execute(
-            "UPDATE people SET full_name = ?1, nickname = ?2, photo_data_url = ?3
+            "UPDATE people
+             SET full_name = ?1,
+                 nickname = ?2,
+                 photo_original_data_url = CASE
+                     WHEN photo_data_url IS NOT ?3 THEN NULL
+                     ELSE photo_original_data_url
+                 END,
+                 photo_data_url = ?3
              WHERE id = ?4",
             params![
                 required_text(draft.full_name, "Full name")?,
@@ -1103,6 +1190,20 @@ fn map_meeting(row: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
     })
 }
 
+fn map_transcript_segment(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptSegment> {
+    Ok(TranscriptSegment {
+        id: row.get(0)?,
+        meeting_id: row.get(1)?,
+        speaker_label: row.get(2)?,
+        person_id: row.get(3)?,
+        identity_source: row.get(4)?,
+        identity_confidence: row.get(5)?,
+        start_ms: row.get(6)?,
+        end_ms: row.get(7)?,
+        text: row.get(8)?,
+    })
+}
+
 fn map_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     Ok(ChatMessage {
         id: row.get(0)?,
@@ -1157,6 +1258,28 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+fn thumbnail_photo_data_url(data_url: &str) -> Option<String> {
+    let (metadata, encoded) = data_url.split_once(',')?;
+    if !matches!(
+        metadata,
+        "data:image/png;base64" | "data:image/jpeg;base64" | "data:image/jpg;base64"
+    ) {
+        return None;
+    }
+    let bytes = BASE64.decode(encoded).ok()?;
+    let image = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let thumbnail = image.thumbnail(MAX_AVATAR_EDGE, MAX_AVATAR_EDGE);
+    let mut output = Vec::new();
+    thumbnail
+        .write_to(&mut Cursor::new(&mut output), ImageFormat::WebP)
+        .ok()?;
+    Some(format!("data:image/webp;base64,{}", BASE64.encode(output)))
+}
+
 fn legacy_voiceprint(value: &str) -> Option<String> {
     if let Some(encoded) = value.strip_prefix("pyannote:v1:") {
         return serde_json::from_str::<serde_json::Value>(encoded)
@@ -1175,11 +1298,153 @@ fn legacy_voiceprint(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 
     fn database() -> (tempfile::TempDir, Database) {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database = Database::open(directory.path().to_path_buf()).expect("database");
         (directory, database)
+    }
+
+    #[test]
+    fn avatar_thumbnail_bounds_large_images_without_losing_alpha() {
+        let source =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(512, 384, Rgba([20, 40, 60, 0])));
+        let mut encoded = Vec::new();
+        source
+            .write_to(&mut Cursor::new(&mut encoded), ImageFormat::Png)
+            .expect("encode source image");
+        let data_url = format!("data:image/png;base64,{}", BASE64.encode(encoded));
+        let animated_or_vector = data_url.replacen("image/png", "image/gif", 1);
+
+        let thumbnail = thumbnail_photo_data_url(&data_url).expect("thumbnail");
+        let bytes = BASE64
+            .decode(thumbnail.split_once(',').expect("data URL").1)
+            .expect("thumbnail bytes");
+        let decoded = image::load_from_memory(&bytes).expect("decode thumbnail");
+
+        assert_eq!(decoded.dimensions(), (256, 192));
+        assert_eq!(decoded.to_rgba8().get_pixel(0, 0).0[3], 0);
+        assert_eq!(thumbnail_photo_data_url(&animated_or_vector), None);
+    }
+
+    #[test]
+    fn avatar_migration_preserves_the_original_until_the_user_replaces_it() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(512, 384, Rgba([20, 40, 60, 255])));
+        let mut encoded = Vec::new();
+        source
+            .write_to(&mut Cursor::new(&mut encoded), ImageFormat::Png)
+            .expect("encode source image");
+        let data_url = format!("data:image/png;base64,{}", BASE64.encode(encoded));
+
+        let database = Database::open(directory.path().to_path_buf()).expect("database");
+        let person = database
+            .create_person(PersonDraft {
+                full_name: "Speaker".to_string(),
+                nickname: None,
+                photo_data_url: Some(data_url.clone()),
+            })
+            .expect("person");
+        drop(database);
+
+        let database = Database::open(directory.path().to_path_buf()).expect("reopened database");
+        let migrated = database
+            .people()
+            .expect("people")
+            .into_iter()
+            .find(|candidate| candidate.id == person.id)
+            .expect("migrated person");
+        assert!(migrated
+            .photo_data_url
+            .as_deref()
+            .is_some_and(|photo| photo.starts_with("data:image/webp;base64,")));
+        let preserved: Option<String> = database
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT photo_original_data_url FROM people WHERE id = ?1",
+                [&person.id],
+                |row| row.get(0),
+            )
+            .expect("preserved original");
+        assert_eq!(preserved.as_deref(), Some(data_url.as_str()));
+
+        database
+            .update_person(
+                &person.id,
+                PersonDraft {
+                    full_name: person.full_name,
+                    nickname: person.nickname,
+                    photo_data_url: None,
+                },
+            )
+            .expect("remove photo");
+        let preserved: Option<String> = database
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT photo_original_data_url FROM people WHERE id = ?1",
+                [&person.id],
+                |row| row.get(0),
+            )
+            .expect("cleared original");
+        assert_eq!(preserved, None);
+    }
+
+    #[test]
+    fn meeting_segment_queries_do_not_load_the_rest_of_the_library() {
+        let (_directory, database) = database();
+        let first = database
+            .create_meeting(MeetingDraft {
+                title: "First".to_string(),
+                project_id: None,
+            })
+            .expect("first meeting");
+        let second = database
+            .create_meeting(MeetingDraft {
+                title: "Second".to_string(),
+                project_id: None,
+            })
+            .expect("second meeting");
+        let person = database
+            .create_person(PersonDraft {
+                full_name: "Speaker".to_string(),
+                nickname: None,
+                photo_data_url: None,
+            })
+            .expect("person");
+        for meeting in [&first, &second] {
+            database
+                .replace_segments(
+                    &meeting.id,
+                    vec![TranscriptSegment {
+                        id: Uuid::new_v4().to_string(),
+                        meeting_id: meeting.id.clone(),
+                        speaker_label: "A".to_string(),
+                        person_id: Some(person.id.clone()),
+                        identity_source: Some("manual".to_string()),
+                        identity_confidence: None,
+                        start_ms: 0,
+                        end_ms: if meeting.id == first.id { 500 } else { 1_500 },
+                        text: meeting.title.clone(),
+                    }],
+                )
+                .expect("segments");
+        }
+
+        let scoped = database
+            .segments_for_meeting(&first.id)
+            .expect("scoped segments");
+        let best = database
+            .best_assigned_segment_for_person(&person.id)
+            .expect("best segment")
+            .expect("assigned segment");
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].meeting_id, first.id);
+        assert_eq!(best.meeting_id, second.id);
     }
 
     #[test]

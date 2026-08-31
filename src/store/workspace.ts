@@ -120,6 +120,36 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     syncHistoryState();
   }
 
+  function storeMeeting(meeting: Meeting): void {
+    set((state) => ({
+      meetings: state.meetings.map((candidate) => candidate.id === meeting.id ? meeting : candidate),
+    }));
+  }
+
+  function storePerson(person: WorkspaceSnapshot["people"][number]): void {
+    set((state) => ({
+      people: state.people.map((candidate) => candidate.id === person.id ? person : candidate),
+    }));
+  }
+
+  async function loadSegmentsForMeeting(meetingId: string): Promise<void> {
+    try {
+      const segments = await desktop.loadMeetingSegments(meetingId);
+      if (get().selectedMeetingId === meetingId) set({ segments });
+    } catch (error) {
+      if (get().selectedMeetingId === meetingId) showError(error);
+    }
+  }
+
+  async function enrollBestAvailableAssignment(personId: string): Promise<void> {
+    try {
+      const assigned = await desktop.findVoiceEnrollmentSegment(personId);
+      if (assigned) await enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, personId);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function run<T>(action: () => Promise<T>): Promise<T | null> {
     set({ busy: true });
     try {
@@ -134,7 +164,19 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
   async function refresh(): Promise<void> {
     const snapshot = await desktop.loadWorkspace();
-    set(snapshot);
+    const currentMeetingId = get().selectedMeetingId;
+    const selectedMeeting = snapshot.meetings.find((meeting) => meeting.id === currentMeetingId)
+      ?? snapshot.meetings[0]
+      ?? null;
+    const segments = selectedMeeting
+      ? await desktop.loadMeetingSegments(selectedMeeting.id)
+      : [];
+    set({
+      ...snapshot,
+      segments,
+      selectedMeetingId: selectedMeeting?.id ?? null,
+      selectedProjectId: selectedMeeting?.projectId ?? get().selectedProjectId,
+    });
   }
 
   async function enrollFromAssignment(meetingId: string, speakerLabel: string, personId: string): Promise<void> {
@@ -148,11 +190,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       || enrollmentInFlight.has(personId)) return;
     enrollmentInFlight.add(personId);
     try {
-      await desktop.enrollVoiceProfile(meetingId, speakerLabel, personId);
-      await refresh();
+      const person = await desktop.enrollVoiceProfile(meetingId, speakerLabel, personId);
+      storePerson(person);
     } catch (error) {
       showError(error);
-      await refresh();
     } finally {
       enrollmentInFlight.delete(personId);
     }
@@ -226,7 +267,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     if (JSON.stringify(before) === JSON.stringify(after)) return true;
     const succeeded = await run(async () => {
       await desktop.reorderMeetings(after);
-      await refresh();
+      const placements = new Map(after.map((placement) => [placement.id, placement]));
+      set((state) => ({
+        meetings: state.meetings.map((meeting) => {
+          const placement = placements.get(meeting.id);
+          return placement ? { ...meeting, projectId: placement.projectId, position: placement.position } : meeting;
+        }),
+      }));
       return true;
     });
     if (!succeeded) return false;
@@ -241,11 +288,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   async function resumeInterruptedTranscriptions(meetingIds: string[]): Promise<void> {
     for (const meetingId of meetingIds) {
       try {
-        await desktop.transcribeMeeting(meetingId);
+        storeMeeting(await desktop.transcribeMeeting(meetingId));
+        if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
       } catch (error) {
         showError(error);
-      } finally {
-        await refresh();
       }
     }
   }
@@ -269,17 +315,20 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       set({ loading: true });
       try {
         const snapshot = await desktop.loadWorkspace();
+        const selectedMeetingId = snapshot.meetings[0]?.id ?? null;
+        const segments = selectedMeetingId
+          ? await desktop.loadMeetingSegments(selectedMeetingId)
+          : [];
         set({
           ...snapshot,
-          selectedMeetingId: snapshot.meetings[0]?.id ?? null,
+          segments,
+          selectedMeetingId,
+          selectedProjectId: snapshot.meetings[0]?.projectId ?? null,
         });
         if (snapshot.settings.speakerIdentificationEnabled && snapshot.settings.pyannoteApiKeyConfigured) {
           for (const person of snapshot.people) {
             if (person.voiceProfile?.status !== "pending_sample" || !person.voiceProfile.consentConfirmedAt) continue;
-            const assigned = snapshot.segments
-              .filter((segment) => segment.personId === person.id)
-              .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0];
-            if (assigned) void enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, person.id);
+            void enrollBestAvailableAssignment(person.id);
           }
         }
         const selected = snapshot.meetings[0];
@@ -306,18 +355,19 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     selectMeeting(id) {
       const meeting = get().meetings.find((candidate) => candidate.id === id);
-      set({ selectedMeetingId: id, selectedProjectId: meeting?.projectId ?? null });
+      set({ selectedMeetingId: id, selectedProjectId: meeting?.projectId ?? null, segments: [] });
+      void loadSegmentsForMeeting(id);
       if (meeting?.status === "failed" && meeting.errorMessage) showError(meeting.errorMessage);
     },
 
     selectProject(id) {
-      set({ selectedProjectId: id, selectedMeetingId: null });
+      set({ selectedProjectId: id, selectedMeetingId: null, segments: [] });
     },
 
     async createProject(draft) {
       const created = await run(async () => {
         const project = await desktop.createProject(draft);
-        await refresh();
+        set((state) => ({ projects: [...state.projects, project] }));
         return project;
       });
       return created !== null;
@@ -328,8 +378,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       if (!project || project.name === name) return true;
       const previousName = project.name;
       const succeeded = await run(async () => {
-        await desktop.renameProject(id, name);
-        await refresh();
+        const renamed = await desktop.renameProject(id, name);
+        set((state) => ({
+          projects: state.projects.map((candidate) => candidate.id === id ? renamed : candidate),
+        }));
         return true;
       });
       if (!succeeded) return false;
@@ -343,8 +395,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async deleteProject(id) {
       const succeeded = await run(async () => {
         await desktop.deleteProject(id);
-        await refresh();
-        if (get().selectedProjectId === id) set({ selectedProjectId: null });
+        set((state) => ({
+          projects: state.projects.filter((project) => project.id !== id),
+          meetings: state.meetings.map((meeting) => meeting.projectId === id
+            ? { ...meeting, projectId: null }
+            : meeting),
+          selectedProjectId: state.selectedProjectId === id ? null : state.selectedProjectId,
+        }));
         return true;
       });
       return succeeded === true;
@@ -355,7 +412,12 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       if (previousIds.join() === ids.join()) return true;
       const succeeded = await run(async () => {
         await desktop.reorderProjects(ids);
-        await refresh();
+        const positions = new Map(ids.map((id, position) => [id, position]));
+        set((state) => ({
+          projects: state.projects
+            .map((project) => ({ ...project, position: positions.get(project.id) ?? project.position }))
+            .sort((a, b) => a.position - b.position),
+        }));
         return true;
       });
       if (!succeeded) return false;
@@ -369,8 +431,17 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async createMeeting(draft) {
       return run(async () => {
         const created = await desktop.createMeeting(draft);
-        await refresh();
-        set({ selectedMeetingId: created.id, selectedProjectId: created.projectId });
+        set((state) => ({
+          meetings: [
+            created,
+            ...state.meetings.map((meeting) => meeting.projectId === created.projectId
+              ? { ...meeting, position: meeting.position + 1 }
+              : meeting),
+          ],
+          segments: [],
+          selectedMeetingId: created.id,
+          selectedProjectId: created.projectId,
+        }));
         return created;
       });
     },
@@ -380,8 +451,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       if (!meeting || meeting.title === title) return true;
       const previousTitle = meeting.title;
       const succeeded = await run(async () => {
-        await desktop.renameMeeting(id, title);
-        await refresh();
+        storeMeeting(await desktop.renameMeeting(id, title));
         return true;
       });
       if (!succeeded) return false;
@@ -410,14 +480,19 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       if (!meeting) return false;
       const succeeded = await run(async () => {
         await desktop.deleteMeeting(id);
-        await refresh();
-        if (get().selectedMeetingId === id) {
-          const nextMeeting = get().meetings[0] ?? null;
-          set({
+        const state = get();
+        const remaining = state.meetings.filter((candidate) => candidate.id !== id);
+        const deletingSelected = state.selectedMeetingId === id;
+        const nextMeeting = deletingSelected ? remaining[0] ?? null : null;
+        set({
+          meetings: remaining,
+          ...(deletingSelected ? {
+            segments: [],
             selectedMeetingId: nextMeeting?.id ?? null,
             selectedProjectId: nextMeeting?.projectId ?? null,
-          });
-        }
+          } : {}),
+        });
+        if (nextMeeting) void loadSegmentsForMeeting(nextMeeting.id);
         return true;
       });
       if (!succeeded) return false;
@@ -430,8 +505,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async createPerson(draft) {
       const result = await run(async () => {
-        await desktop.createPerson(draft);
-        await refresh();
+        const person = await desktop.createPerson(draft);
+        set((state) => ({ people: [...state.people, person] }));
         return true;
       });
       return result === true;
@@ -439,8 +514,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async updatePerson(id, draft) {
       const result = await run(async () => {
-        await desktop.updatePerson(id, draft);
-        await refresh();
+        storePerson(await desktop.updatePerson(id, draft));
         return true;
       });
       return result === true;
@@ -449,13 +523,22 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async deletePerson(id) {
       const result = await run(async () => {
         await desktop.deletePerson(id);
-        await refresh();
+        set((state) => ({
+          people: state.people.filter((person) => person.id !== id),
+          segments: state.segments.map((segment) => segment.personId === id
+            ? { ...segment, personId: null }
+            : segment),
+          settings: state.settings.localSpeakerPersonId === id
+            ? { ...state.settings, localSpeakerPersonId: null }
+            : state.settings,
+        }));
         return true;
       });
       return result === true;
     },
 
     async assignSpeaker(meetingId, speakerLabel, personId) {
+      const selectedMeetingId = get().selectedMeetingId;
       const previousSegments = get().segments;
       const previousPersonId = previousSegments.find(
         (segment) => segment.meetingId === meetingId && segment.speakerLabel === speakerLabel,
@@ -468,7 +551,6 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       }));
       try {
         await desktop.assignSpeaker(meetingId, speakerLabel, personId);
-        await refresh();
         remember({
           undo: () => desktop.assignSpeaker(meetingId, speakerLabel, previousPersonId),
           redo: () => desktop.assignSpeaker(meetingId, speakerLabel, personId),
@@ -476,7 +558,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         if (personId) void enrollFromAssignment(meetingId, speakerLabel, personId);
         return true;
       } catch (error) {
-        set({ segments: previousSegments });
+        if (get().selectedMeetingId === selectedMeetingId) set({ segments: previousSegments });
         showError(error);
         return false;
       }
@@ -485,6 +567,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async deleteTranscriptSegments(ids) {
       const uniqueIds = [...new Set(ids)];
       if (uniqueIds.length === 0) return false;
+      const selectedMeetingId = get().selectedMeetingId;
       const previousSegments = get().segments;
       const idSet = new Set(uniqueIds);
       set((state) => ({
@@ -492,14 +575,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       }));
       try {
         const backups = await desktop.deleteTranscriptSegments(uniqueIds);
-        await refresh();
         remember({
           undo: () => desktop.restoreTranscriptSegments(backups),
           redo: async () => { await desktop.deleteTranscriptSegments(uniqueIds); },
         });
         return true;
       } catch (error) {
-        set({ segments: previousSegments });
+        if (get().selectedMeetingId === selectedMeetingId) set({ segments: previousSegments });
         showError(error);
         return false;
       }
@@ -507,8 +589,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async acknowledgePrivacyNotice(enableVoiceIdentification) {
       const result = await run(async () => {
-        await desktop.acknowledgePrivacyNotice(enableVoiceIdentification);
-        await refresh();
+        const settings = await desktop.acknowledgePrivacyNotice(enableVoiceIdentification);
+        set({ settings });
         return true;
       });
       return result === true;
@@ -516,24 +598,23 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async setPersonVoiceConsent(personId, confirmed) {
       const result = await run(async () => {
-        await desktop.setPersonVoiceConsent(personId, confirmed);
-        await refresh();
+        storePerson(await desktop.setPersonVoiceConsent(personId, confirmed));
         return true;
       });
       if (result !== true) return false;
       if (confirmed) {
-        const assigned = get().segments
-          .filter((segment) => segment.personId === personId)
-          .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0];
-        if (assigned) void enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, personId);
+        void enrollBestAvailableAssignment(personId);
       }
       return true;
     },
 
     async withdrawBiometricConsent() {
       const result = await run(async () => {
-        await desktop.withdrawBiometricConsent();
-        await refresh();
+        const settings = await desktop.withdrawBiometricConsent();
+        set((state) => ({
+          settings,
+          people: state.people.map((person) => ({ ...person, voiceProfile: null })),
+        }));
         return true;
       });
       return result === true;
@@ -541,8 +622,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async updateSettings(settings) {
       const result = await run(async () => {
-        await desktop.updateSettings(settings);
-        await refresh();
+        set({ settings: await desktop.updateSettings(settings) });
         return true;
       });
       return result === true;
@@ -550,8 +630,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async setApiKey(apiKey) {
       const result = await run(async () => {
-        await desktop.setApiKey(apiKey);
-        await refresh();
+        const configured = await desktop.setApiKey(apiKey);
+        set((state) => ({
+          settings: { ...state.settings, apiKeyConfigured: configured },
+        }));
         return true;
       });
       return result === true;
@@ -559,17 +641,16 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async setPyannoteApiKey(apiKey) {
       const result = await run(async () => {
-        await desktop.setPyannoteApiKey(apiKey);
-        await refresh();
+        const configured = await desktop.setPyannoteApiKey(apiKey);
+        set((state) => ({
+          settings: { ...state.settings, pyannoteApiKeyConfigured: configured },
+        }));
         return true;
       });
       if (result === true && apiKey.trim()) {
         for (const person of get().people) {
           if (!person.voiceProfile?.consentConfirmedAt || person.voiceProfile.status === "ready") continue;
-          const assigned = get().segments
-            .filter((segment) => segment.personId === person.id)
-            .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0];
-          if (assigned) void enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, person.id);
+          void enrollBestAvailableAssignment(person.id);
         }
       }
       return result === true;
@@ -586,8 +667,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async startRecording(request) {
       const result = await run(async () => {
         set({ recordingPaused: false });
-        await desktop.startRecording(request);
-        await refresh();
+        storeMeeting(await desktop.startRecording(request));
         return true;
       });
       return result === true;
@@ -595,8 +675,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     async stopRecording(meetingId) {
       const stopped = await run(async () => {
-        await desktop.stopRecording(meetingId);
-        await refresh();
+        storeMeeting(await desktop.stopRecording(meetingId));
         set({ recordingPaused: false });
         return true;
       });
@@ -609,11 +688,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           : meeting),
       }));
       try {
-        await desktop.transcribeMeeting(meetingId);
+        storeMeeting(await desktop.transcribeMeeting(meetingId));
       } catch (error) {
         showError(error);
       } finally {
-        await refresh();
+        if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
       }
       return true;
     },
@@ -634,13 +713,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async transcribeMeeting(meetingId) {
       set({ busy: true });
       try {
-        await desktop.transcribeMeeting(meetingId);
+        storeMeeting(await desktop.transcribeMeeting(meetingId));
+        if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
         return true;
       } catch (error) {
         showError(error);
         return false;
       } finally {
-        await refresh();
         set({ busy: false });
       }
     },

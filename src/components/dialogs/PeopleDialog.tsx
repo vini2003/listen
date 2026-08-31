@@ -57,7 +57,7 @@ export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
   async function readFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0];
     if (!file) return;
-    const dataUrl = await fileToDataUrl(file);
+    const dataUrl = await fileToAvatarDataUrl(file);
     setDraft((current) => ({ ...current, photoDataUrl: dataUrl }));
     event.target.value = "";
   }
@@ -149,11 +149,26 @@ function voiceProfileDescription(person: Person): string {
   return "No biometric voice profile is stored.";
 }
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
+async function fileToAvatarDataUrl(file: File): Promise<string> {
+  const source = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+  if (file.type !== "image/png" && file.type !== "image/jpeg") return source;
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const element = new Image();
+    element.onload = () => resolve(element);
+    element.onerror = () => reject(new Error("The selected photo could not be read"));
+    element.src = source;
+  });
+  const scale = Math.min(1, 256 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return source;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/webp", 0.84);
 }
