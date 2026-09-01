@@ -1,16 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { CreateMeetingDialog, CreateProjectDialog } from "./components/dialogs/CreateDialogs";
 import { PeopleDialog } from "./components/dialogs/PeopleDialog";
-import { PrivacyNoticeDialog } from "./components/dialogs/PrivacyNoticeDialog";
-import { SettingsDialog } from "./components/dialogs/SettingsDialog";
+import { SettingsDialog, type SettingsSection } from "./components/dialogs/SettingsDialog";
 import { EmptyState } from "./components/EmptyState";
 import { MeetingView } from "./components/meeting/MeetingView";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppUpdater } from "./components/ui/AppUpdater";
 import { ToastViewport } from "./components/ui/ToastViewport";
+import { watchTheme } from "./lib/theme";
+import { focusTranscriptTime } from "./lib/transcriptFocus";
+import {
+  ASSISTANT_ATTACHED_EVENT,
+  ASSISTANT_REFERENCE_EVENT,
+  focusAssistantWindow,
+  listenForAssistantEvent,
+  listenForBrowserReference,
+  type AssistantReference,
+} from "./services/assistantWindow";
 import { useWorkspace } from "./store/workspace";
-
-const PRIVACY_NOTICE_VERSION = "2026-08-14";
 
 export default function App() {
   const workspace = useWorkspace();
@@ -18,14 +25,55 @@ export default function App() {
   const [createMeetingOpen, setCreateMeetingOpen] = useState(false);
   const [newMeetingProjectId, setNewMeetingProjectId] = useState<string | null>(null);
   const [peopleOpen, setPeopleOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState<{ section?: SettingsSection } | null>(null);
 
   useEffect(() => { void workspace.load(); }, []);
 
+  useEffect(() => watchTheme(workspace.settings.theme), [workspace.settings.theme]);
+
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = workspace.settings.theme;
-  }, [workspace.settings.theme]);
+    function openReference(reference: AssistantReference): void {
+      if (!workspace.meetings.some((meeting) => meeting.id === reference.meetingId)) return;
+      workspace.selectMeeting(reference.meetingId);
+      window.setTimeout(() => focusTranscriptTime(reference.meetingId, reference.timeMs), 100);
+    }
+
+    let disposed = false;
+    let unlisten = (): void => {};
+    const stopBrowserListener = listenForBrowserReference(openReference);
+    void listenForAssistantEvent<AssistantReference>(ASSISTANT_REFERENCE_EVENT, openReference)
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      });
+    return () => {
+      disposed = true;
+      unlisten();
+      stopBrowserListener();
+    };
+  }, [workspace.meetings, workspace.selectMeeting]);
+
+  useEffect(() => {
+    let disposed = false;
+    let focusTimer: number | null = null;
+    let unlisten = (): void => {};
+    void listenForAssistantEvent<string>(ASSISTANT_ATTACHED_EVENT, (meetingId) => {
+      if (!workspace.meetings.some((meeting) => meeting.id === meetingId)) return;
+      workspace.selectMeeting(meetingId);
+      if (focusTimer !== null) window.clearTimeout(focusTimer);
+      focusTimer = window.setTimeout(() => {
+        document.querySelector<HTMLTextAreaElement>("textarea[data-ask-composer]")?.focus();
+      }, 80);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten();
+      if (focusTimer !== null) window.clearTimeout(focusTimer);
+    };
+  }, [workspace.meetings, workspace.selectMeeting]);
 
   const selectedMeeting = useMemo(
     () => workspace.meetings.find((meeting) => meeting.id === workspace.selectedMeetingId) ?? null,
@@ -51,10 +99,12 @@ export default function App() {
         openCreateMeeting(workspace.selectedProjectId);
       } else if (key === ",") {
         event.preventDefault();
-        setSettingsOpen(true);
+        setSettingsOpen({});
       } else if (key === "k") {
         event.preventDefault();
-        document.querySelector<HTMLTextAreaElement>("[data-ask-composer]")?.focus();
+        const composer = document.querySelector<HTMLElement>("[data-ask-composer]");
+        if (composer?.matches("textarea")) composer.focus();
+        else void focusAssistantWindow();
       } else if (key === "r" && event.shiftKey && selectedMeeting) {
         event.preventDefault();
         document.querySelector<HTMLButtonElement>(`[data-record-meeting="${selectedMeeting.id}"]`)?.click();
@@ -75,6 +125,10 @@ export default function App() {
     setCreateMeetingOpen(true);
   }
 
+  function openSettings(section?: SettingsSection): void {
+    setSettingsOpen({ section });
+  }
+
   if (workspace.loading) {
     return <div className="app-loading"><span className="brand-loading-mark">L</span><p>Opening Listen…</p></div>;
   }
@@ -85,7 +139,7 @@ export default function App() {
         onCreateProject={() => setCreateProjectOpen(true)}
         onCreateMeeting={openCreateMeeting}
         onOpenPeople={() => setPeopleOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openSettings()}
       />
 
       <div className="workspace-main">
@@ -93,6 +147,7 @@ export default function App() {
           <MeetingView
             meeting={selectedMeeting}
             onOpenPeople={() => setPeopleOpen(true)}
+            onOpenSettings={openSettings}
           />
         ) : (
           <EmptyState onCreateProject={() => setCreateProjectOpen(true)} onCreateMeeting={() => openCreateMeeting(null)} />
@@ -106,8 +161,7 @@ export default function App() {
       <CreateProjectDialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
       <CreateMeetingDialog open={createMeetingOpen} initialProjectId={newMeetingProjectId} onClose={() => setCreateMeetingOpen(false)} />
       <PeopleDialog open={peopleOpen} onClose={() => setPeopleOpen(false)} />
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <PrivacyNoticeDialog open={workspace.settings.privacyNoticeVersion !== PRIVACY_NOTICE_VERSION} />
+      <SettingsDialog open={settingsOpen !== null} initialSection={settingsOpen?.section} onClose={() => setSettingsOpen(null)} />
     </div>
   );
 }

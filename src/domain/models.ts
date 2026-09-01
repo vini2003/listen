@@ -32,11 +32,10 @@ export interface Person {
   createdAt: string;
 }
 
-export type VoiceProfileStatus = "consent_required" | "pending_sample" | "learning" | "ready" | "failed";
+export type VoiceProfileStatus = "pending_sample" | "learning" | "ready" | "failed" | "disabled";
 
 export interface VoiceProfileSummary {
   status: VoiceProfileStatus;
-  consentConfirmedAt: string | null;
   enrollmentDurationMs: number | null;
   enrollmentClipCount: number | null;
   source: string | null;
@@ -109,9 +108,6 @@ export interface AppSettings {
   theme: "light" | "dark" | "system";
   apiKeyConfigured: boolean;
   pyannoteApiKeyConfigured: boolean;
-  privacyNoticeVersion: string | null;
-  biometricConsentAcceptedAt: string | null;
-  speakerIdentificationEnabled: boolean;
   localSpeakerPersonId: string | null;
   preferLocalSpeakerForMicrophone: boolean;
 }
@@ -122,6 +118,12 @@ export interface WorkspaceSnapshot {
   people: Person[];
   segments: TranscriptSegment[];
   devices: AudioDevice[];
+  settings: AppSettings;
+}
+
+export interface AssistantContext {
+  meeting: Meeting;
+  meetings: Meeting[];
   settings: AppSettings;
 }
 

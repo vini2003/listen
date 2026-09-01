@@ -270,6 +270,7 @@ impl ActiveRecording {
         let host = cpal::default_host();
         let mut streams = Vec::new();
         let mut writers = Vec::new();
+        #[cfg(target_os = "windows")]
         let session_started_at = Instant::now();
 
         let session_id = SystemTime::now()
@@ -635,6 +636,7 @@ impl SegmentWriter {
         }
     }
 
+    #[cfg(target_os = "windows")]
     fn write_silence_frames(&mut self, frames: u64) {
         let samples = frames.saturating_mul(self.channels as u64);
         for _ in 0..samples {

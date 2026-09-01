@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
+  AssistantContext,
   AppSettings,
   ChatMessage,
   ChatScope,
@@ -11,9 +12,11 @@ import type {
   Project,
   ProjectDraft,
   RecordingLevels,
+  TranscriptSegment,
   TranscriptSegmentBackup,
   WorkspaceSnapshot,
 } from "../domain/models";
+import { MAX_PLAYBACK_MS, silentWavDataUrl } from "../lib/previewAudio";
 
 export interface RecordingRequest {
   meetingId: string;
@@ -25,6 +28,9 @@ export interface RecordingRequest {
 
 export interface DesktopService {
   loadWorkspace(): Promise<WorkspaceSnapshot>;
+  loadAssistantContext(meetingId: string): Promise<AssistantContext>;
+  loadMeetingSegments(meetingId: string): Promise<TranscriptSegment[]>;
+  findVoiceEnrollmentSegment(personId: string): Promise<TranscriptSegment | null>;
   createProject(draft: ProjectDraft): Promise<Project>;
   renameProject(id: string, name: string): Promise<Project>;
   deleteProject(id: string): Promise<void>;
@@ -38,12 +44,12 @@ export interface DesktopService {
   createPerson(draft: PersonDraft): Promise<Person>;
   updatePerson(id: string, draft: PersonDraft): Promise<Person>;
   deletePerson(id: string): Promise<void>;
-  assignSpeaker(meetingId: string, speakerLabel: string, personId: string | null): Promise<void>;
+  assignSpeaker(meetingId: string, speakerLabel: string, personId: string | null, identitySource?: TranscriptSegment["identitySource"]): Promise<void>;
   deleteTranscriptSegments(ids: string[]): Promise<TranscriptSegmentBackup[]>;
   restoreTranscriptSegments(backups: TranscriptSegmentBackup[]): Promise<void>;
-  acknowledgePrivacyNotice(enableVoiceIdentification: boolean): Promise<AppSettings>;
-  setPersonVoiceConsent(personId: string, confirmed: boolean): Promise<Person>;
-  withdrawBiometricConsent(): Promise<AppSettings>;
+  forgetVoiceProfile(personId: string): Promise<Person>;
+  forgetAllVoiceProfiles(): Promise<void>;
+  enableVoiceProfile(personId: string): Promise<Person>;
   enrollVoiceProfile(meetingId: string, speakerLabel: string, personId: string): Promise<Person>;
   updateSettings(settings: AppSettings): Promise<AppSettings>;
   setApiKey(apiKey: string): Promise<boolean>;
@@ -55,6 +61,7 @@ export interface DesktopService {
   recordingLevels(meetingId: string): Promise<RecordingLevels>;
   transcribeMeeting(meetingId: string): Promise<Meeting>;
   loadSegmentAudio(meetingId: string, startMs: number, endMs: number): Promise<string>;
+  loadMeetingAudioUrl(meetingId: string): Promise<string>;
   loadChatMessages(scope: ChatScope): Promise<ChatMessage[]>;
   completeChat(scope: ChatScope, content: string, messageId?: string | null, clientMessageId?: string | null): Promise<ChatMessage[]>;
 }
@@ -63,6 +70,9 @@ const personColors = ["#d96c4a", "#477a66", "#6256a5", "#b07a28", "#3c6e9b"];
 
 const tauriService: DesktopService = {
   loadWorkspace: () => invoke("load_workspace"),
+  loadAssistantContext: (meetingId) => invoke("load_assistant_context", { meetingId }),
+  loadMeetingSegments: (meetingId) => invoke("load_meeting_segments", { meetingId }),
+  findVoiceEnrollmentSegment: (personId) => invoke("find_voice_enrollment_segment", { personId }),
   createProject: (draft) => invoke("create_project", { draft }),
   renameProject: (id, name) => invoke("rename_project", { id, name }),
   deleteProject: (id) => invoke("delete_project", { id }),
@@ -76,15 +86,13 @@ const tauriService: DesktopService = {
   createPerson: (draft) => invoke("create_person", { draft }),
   updatePerson: (id, draft) => invoke("update_person", { id, draft }),
   deletePerson: (id) => invoke("delete_person", { id }),
-  assignSpeaker: (meetingId, speakerLabel, personId) =>
-    invoke("assign_speaker", { meetingId, speakerLabel, personId }),
+  assignSpeaker: (meetingId, speakerLabel, personId, identitySource) =>
+    invoke("assign_speaker", { meetingId, speakerLabel, personId, identitySource: identitySource ?? null }),
   deleteTranscriptSegments: (ids) => invoke("delete_transcript_segments", { ids }),
   restoreTranscriptSegments: (backups) => invoke("restore_transcript_segments", { backups }),
-  acknowledgePrivacyNotice: (enableVoiceIdentification) =>
-    invoke("acknowledge_privacy_notice", { enableVoiceIdentification }),
-  setPersonVoiceConsent: (personId, confirmed) =>
-    invoke("set_person_voice_consent", { personId, confirmed }),
-  withdrawBiometricConsent: () => invoke("withdraw_biometric_consent"),
+  forgetVoiceProfile: (personId) => invoke("forget_voice_profile", { personId }),
+  forgetAllVoiceProfiles: () => invoke("forget_all_voice_profiles"),
+  enableVoiceProfile: (personId) => invoke("enable_voice_profile", { personId }),
   enrollVoiceProfile: (meetingId, speakerLabel, personId) =>
     invoke("enroll_voice_profile", { meetingId, speakerLabel, personId }),
   updateSettings: (settings) => invoke("update_settings", { settings }),
@@ -98,6 +106,8 @@ const tauriService: DesktopService = {
   transcribeMeeting: (meetingId) => invoke("transcribe_meeting", { meetingId }),
   loadSegmentAudio: (meetingId, startMs, endMs) =>
     invoke("load_segment_audio", { meetingId, startMs, endMs }),
+  loadMeetingAudioUrl: async (meetingId) =>
+    convertFileSrc(await invoke("export_meeting_audio", { meetingId })),
   loadChatMessages: ({ scopeType, scopeId }) =>
     invoke("load_chat_messages", { scopeType, scopeId }),
   completeChat: ({ scopeType, scopeId }, content, messageId = null, clientMessageId = null) =>
@@ -134,7 +144,24 @@ function createBrowserPreviewService(): DesktopService {
 
   return {
     async loadWorkspace() {
-      return structuredClone(snapshot);
+      return { ...structuredClone(snapshot), segments: [] };
+    },
+    async loadAssistantContext(meetingId) {
+      const meeting = snapshot.meetings.find((candidate) => candidate.id === meetingId);
+      if (!meeting) throw new Error("Meeting not found");
+      return {
+        meeting: structuredClone(meeting),
+        meetings: structuredClone(snapshot.meetings),
+        settings: structuredClone(snapshot.settings),
+      };
+    },
+    async loadMeetingSegments(meetingId) {
+      return structuredClone(snapshot.segments.filter((segment) => segment.meetingId === meetingId));
+    },
+    async findVoiceEnrollmentSegment(personId) {
+      return structuredClone(snapshot.segments
+        .filter((segment) => segment.personId === personId && segment.identitySource === "manual")
+        .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0] ?? null);
     },
     async createProject(draft) {
       const project: Project = {
@@ -237,10 +264,11 @@ function createBrowserPreviewService(): DesktopService {
       );
       persist();
     },
-    async assignSpeaker(meetingId, speakerLabel, personId) {
+    async assignSpeaker(meetingId, speakerLabel, personId, identitySource) {
+      const resolvedSource = personId ? identitySource ?? "manual" : null;
       snapshot.segments = snapshot.segments.map((segment) =>
         segment.meetingId === meetingId && segment.speakerLabel === speakerLabel
-          ? { ...segment, personId }
+          ? { ...segment, personId, identitySource: resolvedSource, identityConfidence: null }
           : segment,
       );
       persist();
@@ -263,41 +291,57 @@ function createBrowserPreviewService(): DesktopService {
       snapshot.segments.push(...backups.map((backup) => structuredClone(backup.segment)));
       persist();
     },
-    async acknowledgePrivacyNotice(enableVoiceIdentification) {
-      snapshot.settings.privacyNoticeVersion = "2026-08-14";
-      snapshot.settings.speakerIdentificationEnabled = enableVoiceIdentification;
-      snapshot.settings.biometricConsentAcceptedAt = enableVoiceIdentification ? new Date().toISOString() : null;
-      persist();
-      return snapshot.settings;
-    },
-    async setPersonVoiceConsent(personId, confirmed) {
+    async forgetVoiceProfile(personId) {
       const person = snapshot.people.find((candidate) => candidate.id === personId);
       if (!person) throw new Error("Person not found");
-      person.voiceProfile = confirmed ? {
-        status: "pending_sample",
-        consentConfirmedAt: new Date().toISOString(),
+      person.voiceProfile = {
+        status: "disabled",
         enrollmentDurationMs: null,
         enrollmentClipCount: null,
         source: null,
         updatedAt: new Date().toISOString(),
         lastError: null,
-      } : null;
+      };
       persist();
       return person;
     },
-    async withdrawBiometricConsent() {
-      snapshot.people.forEach((person) => { person.voiceProfile = null; });
-      snapshot.settings.speakerIdentificationEnabled = false;
-      snapshot.settings.biometricConsentAcceptedAt = null;
-      snapshot.settings.localSpeakerPersonId = null;
+    async forgetAllVoiceProfiles() {
+      snapshot.people.forEach((person) => {
+        if (!person.voiceProfile) return;
+        person.voiceProfile = {
+          status: "disabled",
+          enrollmentDurationMs: null,
+          enrollmentClipCount: null,
+          source: null,
+          updatedAt: new Date().toISOString(),
+          lastError: null,
+        };
+      });
       persist();
-      return snapshot.settings;
+    },
+    async enableVoiceProfile(personId) {
+      const person = snapshot.people.find((candidate) => candidate.id === personId);
+      if (!person) throw new Error("Person not found");
+      if (!person.voiceProfile || person.voiceProfile.status === "disabled") {
+        person.voiceProfile = {
+          status: "pending_sample",
+          enrollmentDurationMs: null,
+          enrollmentClipCount: null,
+          source: null,
+          updatedAt: new Date().toISOString(),
+          lastError: null,
+        };
+      }
+      persist();
+      return person;
     },
     async enrollVoiceProfile(_meetingId, _speakerLabel, personId) {
       const person = snapshot.people.find((candidate) => candidate.id === personId);
-      if (!person?.voiceProfile?.consentConfirmedAt) throw new Error("Confirm permission before creating this voice profile");
+      if (!person) throw new Error("Person not found");
+      if (person.voiceProfile?.status === "disabled") {
+        throw new Error("Automatic voice labeling is turned off for this person");
+      }
       person.voiceProfile = {
-        ...person.voiceProfile,
         status: "ready",
         enrollmentDurationMs: 12_000,
         enrollmentClipCount: 2,
@@ -362,8 +406,17 @@ function createBrowserPreviewService(): DesktopService {
       await new Promise((resolve) => window.setTimeout(resolve, 900));
       return mutateMeeting(meetingId, { status: "ready" });
     },
-    async loadSegmentAudio() {
-      throw new Error("Audio playback is available in the desktop app.");
+    async loadSegmentAudio(_meetingId, startMs, endMs) {
+      if (startMs < 0 || endMs <= startMs) throw new Error("Invalid playback range.");
+      if (endMs - startMs > MAX_PLAYBACK_MS) throw new Error("Playback clips are limited to 5 minutes.");
+      return silentWavDataUrl(endMs - startMs);
+    },
+    async loadMeetingAudioUrl(meetingId) {
+      const meeting = snapshot.meetings.find((candidate) => candidate.id === meetingId);
+      if (!meeting || meeting.durationMs <= 0 || !meeting.audioDirectory) {
+        throw new Error("This recording has no saved audio");
+      }
+      return silentWavDataUrl(meeting.durationMs);
     },
     async loadChatMessages(scope) {
       return structuredClone(chatMessages.filter(
@@ -458,20 +511,25 @@ function readPreviewState(): WorkspaceSnapshot {
   if (saved) {
     const snapshot = JSON.parse(saved) as WorkspaceSnapshot;
     snapshot.settings.pyannoteApiKeyConfigured ??= false;
-    snapshot.settings.privacyNoticeVersion ??= null;
-    snapshot.settings.biometricConsentAcceptedAt ??= null;
-    snapshot.settings.speakerIdentificationEnabled ??= false;
     snapshot.settings.localSpeakerPersonId ??= null;
     snapshot.settings.preferLocalSpeakerForMicrophone ??= true;
     snapshot.people.forEach((person) => {
       person.voiceProfile ??= null;
+      // Profiles saved before consent removal may carry the retired status.
+      if ((person.voiceProfile?.status as string) === "consent_required") {
+        person.voiceProfile = { ...person.voiceProfile!, status: "pending_sample" };
+      }
       delete (person as Person & { referenceAudioDataUrl?: string | null }).referenceAudioDataUrl;
     });
     snapshot.segments.forEach((segment) => {
       segment.identitySource ??= segment.personId ? "manual" : null;
       segment.identityConfidence ??= null;
     });
-    snapshot.meetings.forEach((meeting, index) => (meeting.position ??= index));
+    snapshot.meetings.forEach((meeting, index) => {
+      meeting.position ??= index;
+      // A capture can't survive a page reload; normalize sessions interrupted mid-recording.
+      if (meeting.status === "recording") meeting.status = meeting.durationMs > 0 ? "ready" : "draft";
+    });
     snapshot.devices = snapshot.devices.map((device) => device.kind === "system"
       ? {
           ...device,
@@ -532,7 +590,14 @@ function readPreviewState(): WorkspaceSnapshot {
         fullName: "Ethan Brooks",
         nickname: "Ethan",
         photoDataUrl: null,
-        voiceProfile: null,
+        voiceProfile: {
+          status: "ready",
+          enrollmentDurationMs: 14_000,
+          enrollmentClipCount: 2,
+          source: "microphone",
+          updatedAt: now.toISOString(),
+          lastError: null,
+        },
         color: personColors[1],
         createdAt: now.toISOString(),
       },
@@ -554,8 +619,8 @@ function readPreviewState(): WorkspaceSnapshot {
         meetingId,
         speakerLabel: "B",
         personId: ethanId,
-        identitySource: "manual",
-        identityConfidence: null,
+        identitySource: "voiceprint",
+        identityConfidence: 87,
         startMs: 33_000,
         endMs: 52_000,
         text: "Agreed. The acceleration curve feels right now, but the camera still arrives half a beat after the player does.",
@@ -585,9 +650,6 @@ function readPreviewState(): WorkspaceSnapshot {
       theme: "light",
       apiKeyConfigured: false,
       pyannoteApiKeyConfigured: false,
-      privacyNoticeVersion: null,
-      biometricConsentAcceptedAt: null,
-      speakerIdentificationEnabled: false,
       localSpeakerPersonId: null,
       preferLocalSpeakerForMicrophone: true,
     },

@@ -16,10 +16,7 @@
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
     "@tauri-apps/api": "^2.8.0",
-    "@tauri-apps/plugin-dialog": "^2.4.0",
-    "@tauri-apps/plugin-opener": "^2.5.0",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-store": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "framer-motion": "^12.23.12",
     "lucide-react": "^0.468.0",

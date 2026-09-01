@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import type { Meeting } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
+import { EASE_STANDARD } from "../../lib/motion";
+import { recordButtonState } from "../../lib/recording";
 import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
 
@@ -22,14 +24,23 @@ const LEVEL_POLL_INTERVAL_MS = 80;
 const BACKGROUND_LEVEL_POLL_INTERVAL_MS = 750;
 
 export function RecordingDock({ meeting }: RecordingDockProps) {
-  const { devices, settings, updateSettings, startRecording, stopRecording, setRecordingPaused, getRecordingLevels, recordingPaused, busy } = useWorkspace();
+  const { devices, settings, meetings, segments, segmentsLoading, updateSettings, startRecording, stopRecording, setRecordingPaused, getRecordingLevels, recordingPaused, busy } = useWorkspace();
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
+  const [resumeConfirmOpen, setResumeConfirmOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [levelHistory, setLevelHistory] = useState<LevelFrame[]>(createSilentLevelFrames);
   const levelFrameId = useRef(0);
   const recording = meeting.status === "recording";
   const processing = meeting.status === "processing";
   const deviceMenuRef = useDismissableLayer<HTMLDivElement>(deviceMenuOpen, () => setDeviceMenuOpen(false));
+  const resumeConfirmRef = useDismissableLayer<HTMLDivElement>(resumeConfirmOpen, () => setResumeConfirmOpen(false));
+  const hasTranscript = segments.some((segment) => segment.meetingId === meeting.id);
+  const activeRecording = meetings.find((candidate) => candidate.status === "recording") ?? null;
+  // While segments are still loading, assume a transcript exists so the append confirm is never skipped.
+  const buttonState = recordButtonState(meeting, activeRecording, hasTranscript || segmentsLoading);
+  const idle = meeting.status === "ready" && hasTranscript && !recording;
+
+  useEffect(() => setResumeConfirmOpen(false), [meeting.id]);
 
   useEffect(() => setElapsed(0), [meeting.id, recording]);
 
@@ -80,13 +91,8 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
   const microphone = microphones.find((device) => device.id === settings.microphoneDeviceId) || microphones[0];
   const systemDevice = systemDevices.find((device) => device.id === settings.systemDeviceId) || systemDevices[0];
 
-  async function toggleRecording(): Promise<void> {
-    setDeviceMenuOpen(false);
-    if (recording) {
-      await stopRecording(meeting.id);
-      return;
-    }
-
+  async function beginRecording(): Promise<void> {
+    setResumeConfirmOpen(false);
     await startRecording({
       meetingId: meeting.id,
       microphoneDeviceId: microphone?.id ?? null,
@@ -96,8 +102,22 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
     });
   }
 
+  async function toggleRecording(): Promise<void> {
+    setDeviceMenuOpen(false);
+    if (recording) {
+      await stopRecording(meeting.id);
+      return;
+    }
+    if (buttonState.kind === "blocked") return;
+    if (buttonState.kind === "resume" && buttonState.confirm) {
+      setResumeConfirmOpen((open) => !open);
+      return;
+    }
+    await beginRecording();
+  }
+
   return (
-    <div className={`recording-dock ${recording ? "is-recording" : ""}`} ref={deviceMenuRef}>
+    <div className={`recording-dock ${recording ? "is-recording" : ""} ${idle ? "is-idle" : ""}`} ref={deviceMenuRef}>
       <button
         className="device-summary"
         onClick={() => setDeviceMenuOpen((open) => !open)}
@@ -126,6 +146,7 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
             initial={{ opacity: 0, y: 8, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 5, scale: 0.99 }}
+            transition={{ duration: 0.14, ease: EASE_STANDARD }}
           >
             <DeviceSection
               title="Microphone"
@@ -147,7 +168,7 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
         ) : null}
       </AnimatePresence>
 
-      <div className="recording-primary">
+      <div className="recording-primary" ref={resumeConfirmRef}>
         {recording ? <div className="recording-time"><span className={recordingPaused ? "paused-dot" : "live-dot"} />{formatDuration(elapsed)}</div> : null}
         <AnimatePresence initial={false}>
           {recording ? (
@@ -156,6 +177,7 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
               initial={{ opacity: 0, width: 0, scale: .85 }}
               animate={{ opacity: 1, width: 38, scale: 1 }}
               exit={{ opacity: 0, width: 0, scale: .85 }}
+              transition={{ duration: 0.16, ease: EASE_STANDARD }}
               onClick={() => void setRecordingPaused(meeting.id, !recordingPaused)}
               aria-label={recordingPaused ? "Resume recording" : "Pause recording"}
             >
@@ -170,6 +192,7 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
               initial={{ opacity: 0, width: 0 }}
               animate={{ opacity: 1, width: 132 }}
               exit={{ opacity: 0, width: 0 }}
+              transition={{ duration: 0.16, ease: EASE_STANDARD }}
             >
               <LiveWaveform
                 frames={levelHistory}
@@ -178,18 +201,41 @@ export function RecordingDock({ meeting }: RecordingDockProps) {
             </motion.div>
           ) : null}
         </AnimatePresence>
+        <AnimatePresence>
+          {resumeConfirmOpen ? (
+            <motion.div
+              className="resume-confirm"
+              role="dialog"
+              aria-label="Add to this recording?"
+              initial={{ opacity: 0, y: 8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 5, scale: 0.99 }}
+              transition={{ duration: 0.14, ease: EASE_STANDARD }}
+            >
+              <strong>Add to this recording?</strong>
+              <p>New audio is appended and the whole meeting is re-transcribed when you stop. Speaker assignments may need review.</p>
+              <div className="resume-confirm-actions">
+                <button className="secondary-button" onClick={() => setResumeConfirmOpen(false)}>Cancel</button>
+                <button className="primary-button" disabled={busy} onClick={() => void beginRecording()}><Mic size={14} /> Resume recording</button>
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
         <motion.button
           data-record-meeting={meeting.id}
           className={`record-button ${processing ? "processing" : recording ? "stop" : "start"}`}
           onClick={() => void toggleRecording()}
-          disabled={processing || busy || (!settings.captureMicrophone && !settings.captureSystem)}
-          aria-label={processing ? "Transcribing recording" : recording ? "Stop recording" : "Start recording"}
+          disabled={processing || busy || buttonState.kind === "blocked" || (!settings.captureMicrophone && !settings.captureSystem)}
+          aria-label={buttonState.label}
           aria-busy={processing}
           aria-keyshortcuts={shortcutAria("r", { shift: true })}
-          title={`${recording ? "Stop" : "Start"} recording (${shortcutLabel("r", { shift: true })})`}
+          title={buttonState.kind === "blocked" || buttonState.kind === "processing"
+            ? buttonState.label
+            : `${buttonState.label} (${shortcutLabel("r", { shift: true })})`}
           style={meterStyle(levelHistory)}
         >
           {recording && !recordingPaused ? <span className="record-button-meter" /> : null}
+          {buttonState.kind === "resume" ? <span className="record-plus-badge" aria-hidden="true">+</span> : null}
           <AnimatePresence mode="wait" initial={false}>
             <motion.span
               className="record-button-symbol"
@@ -369,6 +415,7 @@ function drawWaveformFrame(
   const contour = 0.72 + Math.sin(frame.id * 1.87) * 0.18 + Math.sin(frame.id * 0.47) * 0.1;
   const edgeFade = Math.min(1, Math.max(0, x / Math.max(1, width * 0.2)));
   const centerX = x + step / 2;
+  /* keep in sync with --drop-target / --recording in styles.css */
   drawWaveformBar(context, centerX, frame.system * contour, height, 3, `rgba(110, 140, 240, ${0.42 * opacity * edgeFade})`);
   drawWaveformBar(context, centerX, frame.microphone * contour, height, 2, `rgba(210, 76, 64, ${opacity * edgeFade})`);
 }

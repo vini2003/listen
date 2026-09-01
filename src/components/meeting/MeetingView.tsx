@@ -1,17 +1,23 @@
 import { motion } from "framer-motion";
 import { useState, type CSSProperties } from "react";
 import type { Meeting } from "../../domain/models";
+import { useMeetingPlayback } from "../../hooks/useMeetingPlayback";
+import type { SettingsSection } from "../dialogs/SettingsDialog";
 import { MeetingChat } from "./MeetingChat";
+import { MeetingHeader } from "./MeetingHeader";
 import { RecordingDock } from "./RecordingDock";
 import { Transcript } from "./Transcript";
 
 interface MeetingViewProps {
   meeting: Meeting;
   onOpenPeople: () => void;
+  onOpenSettings: (section?: SettingsSection) => void;
 }
 
-export function MeetingView({ meeting, onOpenPeople }: MeetingViewProps) {
+export function MeetingView({ meeting, onOpenPeople, onOpenSettings }: MeetingViewProps) {
   const [wideChatWidth, setWideChatWidth] = useState(readWideChatWidth);
+  const [askClearance, setAskClearance] = useState(0);
+  const playback = useMeetingPlayback(meeting);
 
   return (
     <motion.main
@@ -20,15 +26,18 @@ export function MeetingView({ meeting, onOpenPeople }: MeetingViewProps) {
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
-      style={{ "--wide-chat-width": `${wideChatWidth}px` } as CSSProperties}
+      style={{ "--wide-chat-width": `${wideChatWidth}px`, "--ask-clearance": `${askClearance}px` } as CSSProperties}
     >
+      <MeetingHeader meeting={meeting} playback={playback} />
       <section className="transcript-container">
-        <Transcript meeting={meeting} onOpenPeople={onOpenPeople} />
+        <Transcript meeting={meeting} onOpenPeople={onOpenPeople} onOpenSettings={onOpenSettings} transport={playback} />
       </section>
 
       <RecordingDock meeting={meeting} />
       <MeetingChat
         meeting={meeting}
+        onOpenSettings={onOpenSettings}
+        onPanelClearanceChange={setAskClearance}
         widePanelWidth={wideChatWidth}
         onWidePanelWidthChange={setWideChatWidth}
         onWidePanelResizeEnd={(width) => {

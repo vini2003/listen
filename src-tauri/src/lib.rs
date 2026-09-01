@@ -17,16 +17,17 @@ mod voice_reference;
 use std::path::{Path, PathBuf};
 
 use audio::RecordingManager;
-use chrono::Utc;
 use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
-    AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
-    Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
-    WorkspaceSnapshot, PRIVACY_NOTICE_VERSION,
+    AppSettings, AssistantContext, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person,
+    PersonDraft, Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
+    WorkspaceSnapshot,
 };
 use error::{AppError, AppResult};
-use tauri::{Manager, State};
+use parking_lot::Mutex;
+use serde::Serialize;
+use tauri::{Emitter, Manager, State};
 use voice_profile_store::VoiceProfileStore;
 
 struct AppState {
@@ -34,6 +35,21 @@ struct AppState {
     recordings_directory: PathBuf,
     diagnostics: Diagnostics,
     voice_profiles: VoiceProfileStore,
+    assistant_meeting_id: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistantReferenceEvent {
+    meeting_id: String,
+    time_ms: i64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatUpdatedEvent {
+    scope_type: String,
+    scope_id: String,
 }
 
 #[tauri::command]
@@ -73,10 +89,156 @@ fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
         projects: state.database.projects()?,
         meetings: state.database.meetings()?,
         people: state.database.people()?,
-        segments: state.database.segments()?,
+        segments: Vec::new(),
         devices,
         settings,
     })
+}
+
+#[tauri::command]
+fn load_assistant_context(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<AssistantContext> {
+    let mut settings = state.database.settings()?;
+    settings.api_key_configured = credentials::has_openai_key()?;
+    settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
+    Ok(AssistantContext {
+        meeting: state.database.meeting(&meeting_id)?,
+        meetings: state.database.meetings()?,
+        settings,
+    })
+}
+
+#[tauri::command]
+async fn open_assistant_window(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<()> {
+    let meeting = state.database.meeting(&meeting_id)?;
+
+    if let Some(window) = app.get_webview_window("assistant") {
+        navigate_assistant_window(&window, &meeting_id, &meeting.title)?;
+        *state.assistant_meeting_id.lock() = Some(meeting_id);
+        return Ok(());
+    }
+
+    let url =
+        tauri::WebviewUrl::App(format!("index.html?view=assistant&meetingId={meeting_id}").into());
+    if let Err(error) = tauri::WebviewWindowBuilder::new(&app, "assistant", url)
+        .title(format!("Ask — {}", meeting.title))
+        .inner_size(480.0, 700.0)
+        .min_inner_size(360.0, 460.0)
+        .resizable(true)
+        .prevent_overflow()
+        .center()
+        .build()
+    {
+        if let Some(window) = app.get_webview_window("assistant") {
+            navigate_assistant_window(&window, &meeting_id, &meeting.title)?;
+            *state.assistant_meeting_id.lock() = Some(meeting_id);
+            return Ok(());
+        }
+        *state.assistant_meeting_id.lock() = None;
+        return Err(AppError::Window(error.to_string()));
+    }
+    *state.assistant_meeting_id.lock() = Some(meeting_id);
+    Ok(())
+}
+
+fn navigate_assistant_window(
+    window: &tauri::WebviewWindow,
+    meeting_id: &str,
+    meeting_title: &str,
+) -> AppResult<()> {
+    window
+        .set_title(&format!("Ask — {meeting_title}"))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    window
+        .emit("listen://assistant-navigate", meeting_id)
+        .map_err(|error| AppError::Window(error.to_string()))
+}
+
+#[tauri::command]
+fn attached_assistant_meeting(state: State<'_, AppState>) -> Option<String> {
+    state.assistant_meeting_id.lock().clone()
+}
+
+#[tauri::command]
+fn focus_assistant_window(app: tauri::AppHandle) -> AppResult<bool> {
+    let Some(window) = app.get_webview_window("assistant") else {
+        return Ok(false);
+    };
+    window
+        .show()
+        .and_then(|_| window.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn attach_assistant_window(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<()> {
+    state.database.meeting(&meeting_id)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or(AppError::NotFound("Main window"))?;
+    main.show()
+        .and_then(|_| main.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    main.emit("listen://assistant-attached", meeting_id)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    *state.assistant_meeting_id.lock() = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn focus_main_window_reference(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+    time_ms: i64,
+) -> AppResult<()> {
+    state.database.meeting(&meeting_id)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or(AppError::NotFound("Main window"))?;
+    main.show()
+        .and_then(|_| main.set_focus())
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    main.emit(
+        "listen://assistant-reference",
+        AssistantReferenceEvent {
+            meeting_id,
+            time_ms,
+        },
+    )
+    .map_err(|error| AppError::Window(error.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_meeting_segments(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<Vec<domain::TranscriptSegment>> {
+    state.database.segments_for_meeting(&meeting_id)
+}
+
+#[tauri::command]
+fn find_voice_enrollment_segment(
+    state: State<'_, AppState>,
+    person_id: String,
+) -> AppResult<Option<domain::TranscriptSegment>> {
+    state.database.best_assigned_segment_for_person(&person_id)
 }
 
 #[tauri::command]
@@ -127,8 +289,22 @@ fn reorder_meetings(
 }
 
 #[tauri::command]
-fn delete_meeting(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    state.database.delete_meeting(&id)
+fn delete_meeting(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.database.delete_meeting(&id)?;
+    let close_assistant = {
+        let mut assistant_meeting_id = state.assistant_meeting_id.lock();
+        let matches = assistant_meeting_id.as_deref() == Some(id.as_str());
+        if matches {
+            *assistant_meeting_id = None;
+        }
+        matches
+    };
+    if close_assistant {
+        if let Some(window) = app.get_webview_window("assistant") {
+            let _ = window.close();
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -165,10 +341,11 @@ fn assign_speaker(
     meeting_id: String,
     speaker_label: String,
     person_id: Option<String>,
+    identity_source: Option<String>,
 ) -> AppResult<()> {
     state
         .database
-        .assign_speaker(&meeting_id, &speaker_label, person_id)
+        .assign_speaker(&meeting_id, &speaker_label, person_id, identity_source)
 }
 
 #[tauri::command]
@@ -188,71 +365,10 @@ fn restore_transcript_segments(
 }
 
 #[tauri::command]
-fn acknowledge_privacy_notice(
-    state: State<'_, AppState>,
-    enable_voice_identification: bool,
-) -> AppResult<AppSettings> {
-    let mut settings = state.database.settings()?;
-    settings.privacy_notice_version = Some(PRIVACY_NOTICE_VERSION.to_string());
-    settings.speaker_identification_enabled = enable_voice_identification;
-    settings.biometric_consent_accepted_at =
-        enable_voice_identification.then(|| Utc::now().to_rfc3339());
-    state.database.update_settings(&settings)?;
-    Ok(settings)
-}
-
-#[tauri::command]
-fn set_person_voice_consent(
-    state: State<'_, AppState>,
-    person_id: String,
-    confirmed: bool,
-) -> AppResult<Person> {
-    if confirmed {
-        let settings = state.database.settings()?;
-        if !settings.speaker_identification_enabled
-            || settings.biometric_consent_accepted_at.is_none()
-        {
-            return Err(AppError::Validation(
-                "Enable voice identification in Settings first".to_string(),
-            ));
-        }
-    }
-    let stored_voiceprint_exists = confirmed && state.voice_profiles.load(&person_id)?.is_some();
-    let legacy_voiceprint = if confirmed {
-        state
-            .database
-            .voice_profiles()?
-            .into_iter()
-            .find(|profile| profile.person_id == person_id)
-            .and_then(|profile| profile.voiceprint)
-            .or(credentials::legacy_voiceprint(&person_id)?)
-    } else {
-        None
-    };
-    if !confirmed {
-        state.voice_profiles.delete(&person_id)?;
-        credentials::delete_legacy_voiceprint(&person_id)?;
-    }
-    state
-        .database
-        .set_person_voice_consent(&person_id, confirmed)?;
-    if confirmed {
-        if let Some(voiceprint) = legacy_voiceprint {
-            state.voice_profiles.store(&person_id, &voiceprint)?;
-            state.database.clear_voiceprint_blob(&person_id)?;
-            credentials::delete_legacy_voiceprint(&person_id)?;
-            state.database.activate_existing_voice_profile(&person_id)?;
-        } else if stored_voiceprint_exists {
-            state.database.activate_existing_voice_profile(&person_id)?;
-        }
-    }
-    if !confirmed {
-        let mut settings = state.database.settings()?;
-        if settings.local_speaker_person_id.as_deref() == Some(person_id.as_str()) {
-            settings.local_speaker_person_id = None;
-            state.database.update_settings(&settings)?;
-        }
-    }
+fn forget_voice_profile(state: State<'_, AppState>, person_id: String) -> AppResult<Person> {
+    state.voice_profiles.delete(&person_id)?;
+    credentials::delete_legacy_voiceprint(&person_id)?;
+    state.database.disable_voice_profile(&person_id)?;
     state
         .database
         .people()?
@@ -262,18 +378,24 @@ fn set_person_voice_consent(
 }
 
 #[tauri::command]
-fn withdraw_biometric_consent(state: State<'_, AppState>) -> AppResult<AppSettings> {
+fn forget_all_voice_profiles(state: State<'_, AppState>) -> AppResult<()> {
     for profile in state.database.voice_profiles()? {
         state.voice_profiles.delete(&profile.person_id)?;
         credentials::delete_legacy_voiceprint(&profile.person_id)?;
+        state.database.disable_voice_profile(&profile.person_id)?;
     }
-    state.database.delete_all_voice_profiles()?;
-    let mut settings = state.database.settings()?;
-    settings.speaker_identification_enabled = false;
-    settings.biometric_consent_accepted_at = None;
-    settings.local_speaker_person_id = None;
-    state.database.update_settings(&settings)?;
-    Ok(settings)
+    Ok(())
+}
+
+#[tauri::command]
+fn enable_voice_profile(state: State<'_, AppState>, person_id: String) -> AppResult<Person> {
+    state.database.enable_voice_profile(&person_id)?;
+    state
+        .database
+        .people()?
+        .into_iter()
+        .find(|person| person.id == person_id)
+        .ok_or(AppError::NotFound("Person"))
 }
 
 #[tauri::command]
@@ -283,13 +405,6 @@ async fn enroll_voice_profile(
     speaker_label: String,
     person_id: String,
 ) -> AppResult<Person> {
-    let settings = state.database.settings()?;
-    if !settings.speaker_identification_enabled || settings.biometric_consent_accepted_at.is_none()
-    {
-        return Err(AppError::Validation(
-            "Voice identification is disabled".to_string(),
-        ));
-    }
     state.database.mark_voice_profile_learning(&person_id)?;
     let result = async {
         let api_key = credentials::pyannote_key()?;
@@ -366,8 +481,7 @@ fn update_settings(
 ) -> AppResult<AppSettings> {
     settings.api_key_configured = credentials::has_openai_key()?;
     settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
-    state.database.update_settings(&settings)?;
-    Ok(settings)
+    state.database.update_settings(&settings)
 }
 
 #[tauri::command]
@@ -460,6 +574,21 @@ fn load_segment_audio(
 }
 
 #[tauri::command]
+async fn export_meeting_audio(state: State<'_, AppState>, meeting_id: String) -> AppResult<String> {
+    let meeting = state.database.meeting(&meeting_id)?;
+    let directory = meeting
+        .audio_directory
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::Validation("This recording has no saved audio".to_string()))?;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        speech_audio::export_mixed_recording(&directory)
+    })
+    .await
+    .map_err(|error| AppError::Audio(format!("Could not export meeting audio: {error}")))??;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 fn load_chat_messages(
     state: State<'_, AppState>,
     scope_type: String,
@@ -470,6 +599,8 @@ fn load_chat_messages(
 
 #[tauri::command]
 async fn complete_chat(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     scope_type: String,
     scope_id: String,
@@ -490,6 +621,7 @@ async fn complete_chat(
         message_id.as_deref(),
         client_message_id.as_deref(),
     )?;
+    notify_other_chat_window(&app, window.label(), &scope_type, &scope_id);
     let answer = match ai_chat::answer(&state.database, &api_key, &scope_type, &scope_id).await {
         Ok(answer) => answer,
         Err(error) => {
@@ -505,7 +637,30 @@ async fn complete_chat(
     state
         .database
         .append_chat_assistant_message(&scope_type, &scope_id, answer)?;
-    state.database.chat_messages(&scope_type, &scope_id)
+    let messages = state.database.chat_messages(&scope_type, &scope_id)?;
+    notify_other_chat_window(&app, window.label(), &scope_type, &scope_id);
+    Ok(messages)
+}
+
+fn notify_other_chat_window(
+    app: &tauri::AppHandle,
+    source_window: &str,
+    scope_type: &str,
+    scope_id: &str,
+) {
+    let target = if source_window == "assistant" {
+        "main"
+    } else {
+        "assistant"
+    };
+    let _ = app.emit_to(
+        target,
+        "listen://chat-updated",
+        ChatUpdatedEvent {
+            scope_type: scope_type.to_string(),
+            scope_id: scope_id.to_string(),
+        },
+    );
 }
 
 async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Meeting> {
@@ -551,6 +706,17 @@ async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Me
             report.identity_candidates,
         );
     }
+    // Keeps recently-matched voiceprints ahead of the 50-profile identification cap.
+    let matched_people: Vec<String> = report
+        .identity_decisions
+        .iter()
+        .filter_map(|decision| decision.person_id.clone())
+        .collect();
+    if let Err(error) = state.database.touch_voice_profiles(&matched_people) {
+        state
+            .diagnostics
+            .record_pipeline_warning(meeting_id, "identification", &error.to_string());
+    }
     state.diagnostics.record_transcription_completed(
         meeting_id,
         &report.active_sources,
@@ -566,9 +732,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let database = Database::open(app_data_dir.clone())
@@ -611,17 +774,63 @@ pub fn run() {
                     }
                 }
             }
+            // Consent was removed in 0.3: promote profiles that were parked
+            // behind the old per-person permission gate.
+            for profile in database.voice_profiles().unwrap_or_default() {
+                if profile.status != "consent_required" {
+                    continue;
+                }
+                let has_print = profile.voiceprint.is_some()
+                    || voice_profiles
+                        .load(&profile.person_id)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if has_print {
+                    let _ = database.activate_existing_voice_profile(&profile.person_id);
+                } else {
+                    let _ = database.mark_voice_profile_pending(
+                        &profile.person_id,
+                        "The voice profile will be learned from the next labeled recording",
+                    );
+                }
+            }
             app.manage(AppState {
                 database,
                 recordings_directory: app_data_dir.join("recordings"),
                 diagnostics: Diagnostics::new(&app_data_dir),
                 voice_profiles,
+                assistant_meeting_id: Mutex::new(None),
             });
             app.manage(RecordingManager::default());
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+            if window.label() == "main" {
+                if let Some(assistant) = window.app_handle().get_webview_window("assistant") {
+                    let _ = assistant.close();
+                }
+            } else if window.label() == "assistant" {
+                let state = window.state::<AppState>();
+                *state.assistant_meeting_id.lock() = None;
+                let _ = window
+                    .app_handle()
+                    .emit_to("main", "listen://assistant-closed", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             load_workspace,
+            load_assistant_context,
+            open_assistant_window,
+            attached_assistant_meeting,
+            focus_assistant_window,
+            attach_assistant_window,
+            focus_main_window_reference,
+            load_meeting_segments,
+            find_voice_enrollment_segment,
             create_project,
             rename_project,
             delete_project,
@@ -638,9 +847,9 @@ pub fn run() {
             assign_speaker,
             delete_transcript_segments,
             restore_transcript_segments,
-            acknowledge_privacy_notice,
-            set_person_voice_consent,
-            withdraw_biometric_consent,
+            forget_voice_profile,
+            forget_all_voice_profiles,
+            enable_voice_profile,
             enroll_voice_profile,
             update_settings,
             set_api_key,
@@ -652,6 +861,7 @@ pub fn run() {
             recording_levels,
             transcribe_meeting,
             load_segment_audio,
+            export_meeting_audio,
             load_chat_messages,
             complete_chat,
         ])

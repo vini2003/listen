@@ -1,6 +1,7 @@
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ModalOpenContext } from "./Modal";
 
 export interface SelectOption {
   value: string;
@@ -31,6 +32,7 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
   const [position, setPosition] = useState<MenuPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const modalOpen = useContext(ModalOpenContext);
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
   const selected = options[selectedIndex] ?? options[0];
 
@@ -65,6 +67,24 @@ export function CustomSelect({ value, options, onChange, ariaLabel, compact = fa
   useLayoutEffect(() => {
     if (open) measure();
   }, [open, options.length, maxVisibleOptions]);
+
+  useEffect(() => {
+    if (!modalOpen) setOpen(false);
+  }, [modalOpen]);
+
+  useEffect(() => {
+    if (!open) return;
+    let frame = 0;
+    let last = triggerRef.current?.getBoundingClientRect();
+    const follow = (): void => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (rect && last && (rect.top !== last.top || rect.left !== last.left || rect.width !== last.width || rect.bottom !== last.bottom)) measure();
+      if (rect) last = rect;
+      frame = window.requestAnimationFrame(follow);
+    };
+    frame = window.requestAnimationFrame(follow);
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;

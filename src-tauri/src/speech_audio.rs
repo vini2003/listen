@@ -194,6 +194,44 @@ fn recording_session_tracks(
     Ok(sessions)
 }
 
+/// Writes (or reuses) a cached full-meeting mix at `<directory>/mixed.wav`.
+/// The mix is rebuilt whenever any session WAV is newer than the cached file.
+pub fn export_mixed_recording(directory: &Path) -> AppResult<PathBuf> {
+    let output_path = directory.join("mixed.wav");
+    let newest_source = recording_session_tracks(directory)?
+        .into_iter()
+        .flat_map(|(_, tracks)| tracks.into_values().flatten())
+        .filter_map(|path| fs::metadata(&path).and_then(|meta| meta.modified()).ok())
+        .max();
+    let Some(newest_source) = newest_source else {
+        return Err(AppError::Audio(
+            "No saved audio was found for this meeting".to_string(),
+        ));
+    };
+    let up_to_date = fs::metadata(&output_path)
+        .and_then(|meta| meta.modified())
+        .map(|mixed| mixed >= newest_source)
+        .unwrap_or(false);
+    if !up_to_date {
+        // Write to a unique temp file and rename so a failed or concurrent export
+        // can never leave a fresh-looking partial mixed.wav behind.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let temp_path = directory.join(format!("mixed-{nanos}.wav.tmp"));
+        if let Err(error) = write_mixed_recording(directory, &temp_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+        fs::rename(&temp_path, &output_path).map_err(|error| {
+            let _ = fs::remove_file(&temp_path);
+            AppError::Audio(format!("Could not finish meeting audio: {error}"))
+        })?;
+    }
+    Ok(output_path)
+}
+
 pub fn write_mixed_recording(directory: &Path, output_path: &Path) -> AppResult<i64> {
     let sessions = recording_sessions(directory)?;
     let mut writer = hound::WavWriter::create(

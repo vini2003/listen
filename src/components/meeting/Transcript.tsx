@@ -1,19 +1,23 @@
-import { Check, ChevronDown, Copy, LoaderCircle, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
+import { Check, ChevronDown, Copy, KeyRound, LoaderCircle, Mic2, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
 import { focusFirstMenuItem, moveMenuFocus } from "../../lib/focus";
-import { mergeSequentialSegments, type TranscriptTurn } from "../../lib/transcript";
+import type { MeetingPlayback } from "../../hooks/useMeetingPlayback";
+import { mergeSequentialSegments, transcriptStateFor, type TranscriptTurn } from "../../lib/transcript";
 import { useWorkspace } from "../../store/workspace";
+import type { SettingsSection } from "../dialogs/SettingsDialog";
 import { Avatar } from "../ui/Avatar";
 
 interface TranscriptProps {
   meeting: Meeting;
   onOpenPeople: () => void;
+  onOpenSettings: (section?: SettingsSection) => void;
+  transport: MeetingPlayback;
 }
 
-export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
+export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }: TranscriptProps) {
   const {
     segments,
     people,
@@ -21,6 +25,7 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
     settings,
     transcribeMeeting,
     busy,
+    segmentsLoading,
     loadSegmentAudio,
     deleteTranscriptSegments,
   } = useWorkspace();
@@ -50,12 +55,20 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
 
   useEffect(() => {
     return () => {
-      audioRef.current?.pause();
+      disposeAudio(audioRef.current);
       audioRef.current = null;
     };
   }, [meeting.id]);
 
+  useEffect(() => {
+    if (!transport.playing) return;
+    disposeAudio(audioRef.current);
+    audioRef.current = null;
+    setPlayingAudioId(null);
+  }, [transport.playing]);
+
   async function togglePlayback(segment: TranscriptSegment): Promise<void> {
+    transport.pause();
     const currentAudio = audioRef.current;
     if (playingAudioId === segment.id && currentAudio && !currentAudio.paused) {
       currentAudio.pause();
@@ -63,15 +76,17 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
       return;
     }
 
-    currentAudio?.pause();
+    disposeAudio(currentAudio);
     audioRef.current = null;
     setPlayingAudioId(null);
     setLoadingAudioId(segment.id);
 
+    const audio = new Audio();
+    audioRef.current = audio;
     try {
-      const audio = new Audio();
-      audioRef.current = audio;
-      audio.src = await loadSegmentAudio(meeting.id, segment.startMs, segment.endMs);
+      const src = await loadSegmentAudio(meeting.id, segment.startMs, segment.endMs);
+      if (audioRef.current !== audio) return;
+      audio.src = src;
       audio.onended = () => {
         if (audioRef.current === audio) setPlayingAudioId(null);
       };
@@ -80,10 +95,13 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
       };
       await audio.play();
       if (audioRef.current === audio) setPlayingAudioId(segment.id);
+      else disposeAudio(audio);
     } catch {
-      audioRef.current?.pause();
-      audioRef.current = null;
-      setPlayingAudioId(null);
+      disposeAudio(audio);
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+        setPlayingAudioId(null);
+      }
     } finally {
       setLoadingAudioId((current) => current === segment.id ? null : current);
     }
@@ -97,14 +115,40 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
 
   async function deleteTurn(segment: TranscriptTurn): Promise<void> {
     if (playingAudioId === segment.id) {
-      audioRef.current?.pause();
+      disposeAudio(audioRef.current);
       audioRef.current = null;
       setPlayingAudioId(null);
     }
     await deleteTranscriptSegments(segment.sourceSegmentIds);
   }
 
-  if (processing && !hasTranscript) {
+  const transcriptState = transcriptStateFor({
+    status: meeting.status,
+    durationMs: meeting.durationMs,
+    hasTranscript,
+    segmentsLoading,
+    pyannoteKeyConfigured: settings.pyannoteApiKeyConfigured,
+  });
+
+  if (transcriptState === "loading") {
+    return (
+      <div className="transcript-state quiet" aria-busy="true">
+        <span className="notice-spinner" />
+      </div>
+    );
+  }
+
+  if (transcriptState === "recording") {
+    return (
+      <div className="transcript-state">
+        <span className="recording-state-mark"><span className="live-dot" /></span>
+        <h3>Recording in progress</h3>
+        <p>Listen is capturing audio. The transcript is created after you stop.</p>
+      </div>
+    );
+  }
+
+  if (transcriptState === "processing") {
     return (
       <div className="transcript-state">
         <span className="processing-orbit"><Sparkles size={22} /></span>
@@ -114,23 +158,44 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
     );
   }
 
-  if (!hasTranscript && !recording) {
+  if (transcriptState === "failed") {
+    return (
+      <div className="transcript-state failed-transcript-state">
+        <span><Sparkles size={22} /></span>
+        <h3>No transcript yet</h3>
+        <p>The audio is still saved locally. You can retry whenever you're ready.</p>
+        {meeting.errorMessage ? (
+          <div className="transcript-notice warning-notice"><span>{meeting.errorMessage}</span></div>
+        ) : null}
+        {settings.pyannoteApiKeyConfigured ? (
+          <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>
+            <Sparkles size={16} /> Try again
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (transcriptState === "awaiting-key" || transcriptState === "ready-to-transcribe" || transcriptState === "empty") {
     return (
       <div className="transcript-state">
         <span><Sparkles size={22} /></span>
-        <h3>{meeting.status === "failed" ? "No transcript yet" : meeting.durationMs > 0 ? "Ready to transcribe" : "Start a recording"}</h3>
+        <h3>{transcriptState === "empty" ? "Start a recording" : "Ready to transcribe"}</h3>
         <p>
-          {meeting.status === "failed"
-            ? "The audio is still saved locally. You can retry whenever you're ready."
-            : meeting.durationMs > 0
-              ? settings.pyannoteApiKeyConfigured
-                ? "Create a transcript with Precision-2 speaker labels."
-                : "Add a pyannote API key in Settings first."
-              : "Press the microphone below. Recording continues until you stop."}
+          {transcriptState === "empty"
+            ? "Press the microphone below. Recording continues until you stop."
+            : transcriptState === "ready-to-transcribe"
+              ? "Create a transcript with Precision-2 speaker labels."
+              : "Add a pyannote API key to create the transcript."}
         </p>
-        {(canTranscribe || meeting.status === "failed" && settings.pyannoteApiKeyConfigured) ? (
+        {transcriptState === "ready-to-transcribe" && canTranscribe ? (
           <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>
-            <Sparkles size={16} /> {meeting.status === "failed" ? "Try again" : "Transcribe"}
+            <Sparkles size={16} /> Transcribe
+          </button>
+        ) : null}
+        {transcriptState === "awaiting-key" ? (
+          <button className="primary-button" onClick={() => onOpenSettings("transcription")}>
+            <KeyRound size={16} /> Add API key
           </button>
         ) : null}
       </div>
@@ -139,6 +204,14 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
 
   return (
     <div className="transcript-list">
+      {meeting.status === "failed" ? (
+        <div className="transcript-notice warning-notice">
+          <span>{meeting.errorMessage || "The last transcription attempt failed."}</span>
+          {settings.pyannoteApiKeyConfigured ? (
+            <button disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>Try again</button>
+          ) : null}
+        </div>
+      ) : null}
       {meetingTurns.map((segment) => (
         <TranscriptRow
           key={segment.id}
@@ -150,14 +223,28 @@ export function Transcript({ meeting, onOpenPeople }: TranscriptProps) {
           canPlay={Boolean(meeting.audioDirectory)}
           loadingAudio={loadingAudioId === segment.id}
           playingAudio={playingAudioId === segment.id}
+          isCurrent={transport.playing && segment.startMs <= transport.currentMs && transport.currentMs < segment.endMs}
           copied={copiedId === segment.id}
           onTogglePlayback={() => void togglePlayback(segment)}
+          onTimestampPress={() => {
+            if (transport.status !== "idle") transport.seek(segment.startMs);
+            else void togglePlayback(segment);
+          }}
           onCopy={() => void copyTurn(segment)}
           onDelete={() => void deleteTurn(segment)}
         />
       ))}
     </div>
   );
+}
+
+function disposeAudio(audio: HTMLAudioElement | null): void {
+  if (!audio) return;
+  audio.pause();
+  audio.onended = null;
+  audio.onerror = null;
+  audio.removeAttribute("src");
+  audio.load();
 }
 
 interface TranscriptRowProps {
@@ -169,13 +256,15 @@ interface TranscriptRowProps {
   canPlay: boolean;
   loadingAudio: boolean;
   playingAudio: boolean;
+  isCurrent: boolean;
   copied: boolean;
   onTogglePlayback: () => void;
+  onTimestampPress: () => void;
   onCopy: () => void;
   onDelete: () => void;
 }
 
-function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, copied, onTogglePlayback, onCopy, onDelete }: TranscriptRowProps) {
+function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, isCurrent, copied, onTogglePlayback, onTimestampPress, onCopy, onDelete }: TranscriptRowProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useDismissableLayer<HTMLDivElement>(open, () => setOpen(false));
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -194,7 +283,7 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
 
   return (
     <article
-      className="transcript-row"
+      className={`transcript-row ${isCurrent ? "is-current" : ""}`}
       data-meeting-id={segment.meetingId}
       data-transcript-start-ms={segment.startMs}
     >
@@ -227,7 +316,26 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
               </div>
             ) : null}
           </div>
-          <span className="timestamp-label">{formatDuration(segment.startMs)}</span>
+          {segment.personId && (segment.identitySource === "voiceprint" || segment.identitySource === "local_microphone") ? (
+            <span className="identity-auto-badge" title={autoIdentityTitle(segment)} aria-label={autoIdentityTitle(segment)}>
+              {segment.identitySource === "local_microphone" ? <Mic2 size={10} /> : <Sparkles size={10} />}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={`timestamp-button ${playingAudio ? "is-playing" : ""} ${loadingAudio ? "is-loading" : ""}`}
+            onClick={onTimestampPress}
+            disabled={!canPlay || loadingAudio}
+            aria-label={playingAudio ? `Pause audio at ${formatDuration(segment.startMs)}` : `Play audio from ${formatDuration(segment.startMs)}`}
+            title={canPlay ? (playingAudio ? "Pause passage" : "Play from here") : undefined}
+          >
+            <span className="timestamp-label">{formatDuration(segment.startMs)}</span>
+            {canPlay ? (
+              <span className="timestamp-glyph" aria-hidden="true">
+                {loadingAudio ? <LoaderCircle className="segment-playback-spinner" size={10} /> : playingAudio ? <Pause size={9} fill="currentColor" /> : <Play size={9} fill="currentColor" />}
+              </span>
+            ) : null}
+          </button>
         </div>
         <p>{segment.text}</p>
       </div>
@@ -251,6 +359,12 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
       </div>
     </article>
   );
+}
+
+function autoIdentityTitle(segment: TranscriptSegment): string {
+  if (segment.identitySource === "local_microphone") return "Labeled automatically from your microphone";
+  const confidence = segment.identityConfidence ? ` · ${Math.round(segment.identityConfidence)}% confident` : "";
+  return `Labeled automatically by voice match${confidence}`;
 }
 
 function alphabeticLabel(index: number): string {

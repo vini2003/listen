@@ -56,7 +56,7 @@ export function CreateMeetingDialog({ open, initialProjectId, onClose }: CreateM
   }
 
   return (
-    <Modal open={open} title="New recording" description="Choose where this conversation belongs. You can move it later." onClose={onClose} size="small">
+    <Modal open={open} title="New meeting" description="Choose where this conversation belongs. You can move it later." onClose={onClose} size="small">
       <form className="dialog-form" onSubmit={(event) => void submit(event)}>
         <label><span>Title</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} /></label>
         <label><span>Project</span><CustomSelect ariaLabel="Project" value={projectId ?? ""} options={[{ value: "", label: "Unsorted" }, ...projects.map((project) => ({ value: project.id, label: project.name }))]} onChange={(value) => setProjectId(value || null)} /></label>

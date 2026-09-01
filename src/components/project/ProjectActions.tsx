@@ -53,7 +53,7 @@ export function ProjectActions({ project, placement = "page" }: ProjectActionsPr
         </button>
         <AnimatePresence>
           {menuOpen ? (
-            <motion.div ref={menuPanelRef} className="project-menu" role="menu" aria-label={`Actions for ${project.name}`} onKeyDown={handleMenuKeyDown} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}>
+            <motion.div ref={menuPanelRef} className="project-menu" role="menu" aria-label={`Actions for ${project.name}`} onKeyDown={handleMenuKeyDown} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.12 }}>
               <button role="menuitem" onClick={() => { setMenuOpen(false); setName(project.name); setRenameOpen(true); }}><Pencil size={15} /> Rename</button>
               <div className="menu-divider" role="separator" />
               <button role="menuitem" className="danger-menu-item" onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={15} /> Delete</button>
