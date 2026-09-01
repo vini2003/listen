@@ -93,10 +93,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 6px 0 9px; color: var(--text-faint); font-size: 11px; font-weight: 650; letter-spacing: 0.055em; text-transform: uppercase; }
 .mini-icon-button { display: grid; place-items: center; width: 25px; height: 25px; background: transparent; color: var(--text-soft); border-radius: 6px; }
 .mini-icon-button:hover { background: var(--hover); color: var(--text); }
-.project-list { display: flex; flex-direction: column; gap: 2px; }
-.project-sort-item { position: relative; list-style: none; border-radius: 9px; cursor: grab; }
-.project-sort-item[data-dragging="true"] { z-index: 20; cursor: grabbing; }
-.project-group { position: relative; padding: 2px; border: 1px solid transparent; border-radius: 9px; transition: background 100ms ease, border-color 100ms ease; }
+.project-list { display: flex; flex-direction: column; gap: 0; }
+.project-group { position: relative; padding: 2px; border: 1px solid transparent; border-radius: 9px; transition: background 100ms ease, border-color 100ms ease, opacity 120ms ease; }
+.project-group.dragging, .folder-group.dragging { opacity: .38; }
+.project-row[draggable="true"], .folder-row[draggable="true"] { cursor: grab; }
+.project-row[draggable="true"]:active, .folder-row[draggable="true"]:active { cursor: grabbing; }
+.folder-group { position: relative; padding: 1px; border: 1px solid transparent; border-radius: 8px; transition: background 100ms ease, border-color 100ms ease, opacity 120ms ease; }
+.folder-group.drop-target { background: color-mix(in srgb, var(--drop-target) 12%, var(--selected)); border-color: color-mix(in srgb, var(--drop-target) 62%, var(--border-strong)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--drop-target) 16%, transparent); }
+.folder-row { padding: 0 4px; min-height: 32px; }
+.folder-row:hover .row-action, .folder-row:focus-within .row-action, .folder-row .row-action:focus-visible { opacity: 1; }
+.folder-row-action { flex: 0 0 25px; }
+.project-drop-indicator { margin: -1px 5px; z-index: 5; }
 .project-group.drop-target { background: color-mix(in srgb, var(--drop-target) 12%, var(--selected)); border-color: color-mix(in srgb, var(--drop-target) 62%, var(--border-strong)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--drop-target) 16%, transparent); }
 .miscellaneous-section.drop-target { background: color-mix(in srgb, var(--drop-target) 11%, var(--selected)); border-color: color-mix(in srgb, var(--drop-target) 62%, var(--border-strong)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--drop-target) 16%, transparent); }
 .sidebar-row { display: flex; align-items: center; width: 100%; min-width: 0; min-height: 34px; border-radius: 7px; color: var(--text-soft); background: transparent; }
@@ -117,6 +124,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .project-row:hover .row-action, .project-row:focus-within .row-action, .row-action:focus-visible { opacity: 1; }
 .project-actions-sidebar:has(.project-menu) .row-action { opacity: 1; background: var(--hover); color: var(--text); }
 .meeting-list { display: flex; flex-direction: column; gap: 0; margin: 1px 0 4px 20px; padding: 3px 0; }
+.meeting-list .meeting-list { margin-left: 14px; margin-bottom: 2px; }
 .meeting-row-shell { position: relative; min-width: 0; border-radius: 7px; transition: opacity 120ms ease, transform 120ms ease; }
 .meeting-row-shell.dragging { opacity: .38; transform: scale(.985); }
 .meeting-drag-preview { position: fixed; z-index: var(--z-drag); left: -1000px; top: -1000px; max-width: 260px; overflow: hidden; padding: 9px 12px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 9px; box-shadow: var(--shadow-lg); font-size: 12.5px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }

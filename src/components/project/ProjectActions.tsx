@@ -1,4 +1,4 @@
-import { Check, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Check, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Project } from "../../domain/models";
@@ -10,9 +10,10 @@ import { Modal } from "../ui/Modal";
 interface ProjectActionsProps {
   project: Project;
   placement?: "sidebar" | "page";
+  onCreateFolder?: () => void;
 }
 
-export function ProjectActions({ project, placement = "page" }: ProjectActionsProps) {
+export function ProjectActions({ project, placement = "page", onCreateFolder }: ProjectActionsProps) {
   const { renameProject, deleteProject, busy } = useWorkspace();
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -54,6 +55,9 @@ export function ProjectActions({ project, placement = "page" }: ProjectActionsPr
         <AnimatePresence>
           {menuOpen ? (
             <motion.div ref={menuPanelRef} className="project-menu" role="menu" aria-label={`Actions for ${project.name}`} onKeyDown={handleMenuKeyDown} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.12 }}>
+              {onCreateFolder ? (
+                <button role="menuitem" onClick={() => { setMenuOpen(false); onCreateFolder(); }}><FolderPlus size={15} /> New folder</button>
+              ) : null}
               <button role="menuitem" onClick={() => { setMenuOpen(false); setName(project.name); setRenameOpen(true); }}><Pencil size={15} /> Rename</button>
               <div className="menu-divider" role="separator" />
               <button role="menuitem" className="danger-menu-item" onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={15} /> Delete</button>

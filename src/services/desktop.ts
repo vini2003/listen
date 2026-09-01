@@ -4,6 +4,8 @@ import type {
   AppSettings,
   ChatMessage,
   ChatScope,
+  Folder,
+  FolderDraft,
   Meeting,
   MeetingDraft,
   MeetingPlacement,
@@ -35,6 +37,10 @@ export interface DesktopService {
   renameProject(id: string, name: string): Promise<Project>;
   deleteProject(id: string): Promise<void>;
   reorderProjects(ids: string[]): Promise<void>;
+  createFolder(draft: FolderDraft): Promise<Folder>;
+  renameFolder(id: string, name: string): Promise<Folder>;
+  moveFolder(id: string, parentId: string | null): Promise<Folder>;
+  deleteFolder(id: string): Promise<void>;
   createMeeting(draft: MeetingDraft): Promise<Meeting>;
   renameMeeting(id: string, title: string): Promise<Meeting>;
   moveMeeting(id: string, projectId: string | null): Promise<Meeting>;
@@ -77,6 +83,10 @@ const tauriService: DesktopService = {
   renameProject: (id, name) => invoke("rename_project", { id, name }),
   deleteProject: (id) => invoke("delete_project", { id }),
   reorderProjects: (ids) => invoke("reorder_projects", { ids }),
+  createFolder: (draft) => invoke("create_folder", { draft }),
+  renameFolder: (id, name) => invoke("rename_folder", { id, name }),
+  moveFolder: (id, parentId) => invoke("move_folder", { id, parentId }),
+  deleteFolder: (id) => invoke("delete_folder", { id }),
   createMeeting: (draft) => invoke("create_meeting", { draft }),
   renameMeeting: (id, title) => invoke("rename_meeting", { id, title }),
   moveMeeting: (id, projectId) => invoke("move_meeting", { id, projectId }),
@@ -183,8 +193,9 @@ function createBrowserPreviewService(): DesktopService {
     },
     async deleteProject(id) {
       snapshot.projects = snapshot.projects.filter((project) => project.id !== id);
+      snapshot.folders = snapshot.folders.filter((folder) => folder.projectId !== id);
       snapshot.meetings = snapshot.meetings.map((meeting) =>
-        meeting.projectId === id ? { ...meeting, projectId: null } : meeting,
+        meeting.projectId === id ? { ...meeting, projectId: null, folderId: null } : meeting,
       );
       persist();
     },
@@ -193,9 +204,59 @@ function createBrowserPreviewService(): DesktopService {
       snapshot.projects.forEach((project, index) => (project.position = index));
       persist();
     },
+    async createFolder(draft) {
+      const folder: Folder = {
+        id: crypto.randomUUID(),
+        projectId: draft.projectId,
+        parentId: draft.parentId,
+        name: draft.name,
+        position: snapshot.folders.filter(
+          (candidate) => candidate.projectId === draft.projectId && candidate.parentId === draft.parentId,
+        ).length,
+        createdAt: new Date().toISOString(),
+      };
+      snapshot.folders.push(folder);
+      persist();
+      return folder;
+    },
+    async renameFolder(id, name) {
+      const folder = snapshot.folders.find((candidate) => candidate.id === id);
+      if (!folder) throw new Error("Folder not found");
+      folder.name = name;
+      persist();
+      return folder;
+    },
+    async moveFolder(id, parentId) {
+      const folder = snapshot.folders.find((candidate) => candidate.id === id);
+      if (!folder) throw new Error("Folder not found");
+      for (let cursor = parentId; cursor !== null;) {
+        if (cursor === id) throw new Error("A folder cannot be moved inside itself");
+        cursor = snapshot.folders.find((candidate) => candidate.id === cursor)?.parentId ?? null;
+      }
+      folder.parentId = parentId;
+      folder.position = snapshot.folders.filter(
+        (candidate) => candidate.projectId === folder.projectId
+          && candidate.parentId === parentId
+          && candidate.id !== id,
+      ).length;
+      persist();
+      return folder;
+    },
+    async deleteFolder(id) {
+      const folder = snapshot.folders.find((candidate) => candidate.id === id);
+      if (!folder) throw new Error("Folder not found");
+      snapshot.folders = snapshot.folders.filter((candidate) => candidate.id !== id);
+      snapshot.folders.forEach((candidate) => {
+        if (candidate.parentId === id) candidate.parentId = folder.parentId;
+      });
+      snapshot.meetings = snapshot.meetings.map((meeting) =>
+        meeting.folderId === id ? { ...meeting, folderId: folder.parentId } : meeting,
+      );
+      persist();
+    },
     async createMeeting(draft) {
       snapshot.meetings
-        .filter((meeting) => meeting.projectId === draft.projectId)
+        .filter((meeting) => meeting.projectId === draft.projectId && meeting.folderId === null)
         .forEach((meeting) => (meeting.position += 1));
       const meeting = makeMeeting(draft);
       snapshot.meetings.unshift(meeting);
@@ -206,13 +267,16 @@ function createBrowserPreviewService(): DesktopService {
       return mutateMeeting(id, { title });
     },
     async moveMeeting(id, projectId) {
-      const position = snapshot.meetings.filter((meeting) => meeting.projectId === projectId).length;
-      return mutateMeeting(id, { projectId, position });
+      const position = snapshot.meetings.filter(
+        (meeting) => meeting.projectId === projectId && meeting.folderId === null,
+      ).length;
+      return mutateMeeting(id, { projectId, folderId: null, position });
     },
     async reorderMeetings(placements) {
       for (const placement of placements) {
         mutateMeeting(placement.id, {
           projectId: placement.projectId,
+          folderId: placement.folderId,
           position: placement.position,
         });
       }
@@ -494,6 +558,7 @@ function makeMeeting(draft: MeetingDraft): Meeting {
   return {
     id: crypto.randomUUID(),
     projectId: draft.projectId,
+    folderId: null,
     position: 0,
     title: draft.title,
     status: "draft",
@@ -510,6 +575,7 @@ function readPreviewState(): WorkspaceSnapshot {
   const saved = localStorage.getItem("listen-browser-preview-v1");
   if (saved) {
     const snapshot = JSON.parse(saved) as WorkspaceSnapshot;
+    snapshot.folders ??= [];
     snapshot.settings.pyannoteApiKeyConfigured ??= false;
     snapshot.settings.localSpeakerPersonId ??= null;
     snapshot.settings.preferLocalSpeakerForMicrophone ??= true;
@@ -527,6 +593,7 @@ function readPreviewState(): WorkspaceSnapshot {
     });
     snapshot.meetings.forEach((meeting, index) => {
       meeting.position ??= index;
+      meeting.folderId ??= null;
       // A capture can't survive a page reload; normalize sessions interrupted mid-recording.
       if (meeting.status === "recording") meeting.status = meeting.durationMs > 0 ? "ready" : "draft";
     });
@@ -555,10 +622,12 @@ function readPreviewState(): WorkspaceSnapshot {
         createdAt: new Date(now.getTime() - 14 * 86_400_000).toISOString(),
       },
     ],
+    folders: [],
     meetings: [
       {
         id: meetingId,
         projectId,
+        folderId: null,
         position: 0,
         title: "Gameplay systems review",
         status: "ready",

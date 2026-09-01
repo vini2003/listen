@@ -17,9 +17,30 @@ pub struct ProjectDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Folder {
+    pub id: String,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub position: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDraft {
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Meeting {
     pub id: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub position: i64,
     pub title: String,
     pub status: String,
@@ -115,6 +136,8 @@ pub struct AudioDevice {
 pub struct MeetingPlacement {
     pub id: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub position: i64,
 }
 
@@ -175,6 +198,7 @@ impl Default for AppSettings {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshot {
     pub projects: Vec<Project>,
+    pub folders: Vec<Folder>,
     pub meetings: Vec<Meeting>,
     pub people: Vec<Person>,
     pub segments: Vec<TranscriptSegment>,

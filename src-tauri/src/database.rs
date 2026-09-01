@@ -8,9 +8,9 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        AppSettings, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person, PersonDraft,
-        Project, ProjectDraft, StoredVoiceProfile, TranscriptSegment, TranscriptSegmentBackup,
-        VoiceProfileSummary,
+        AppSettings, ChatMessage, Folder, FolderDraft, Meeting, MeetingDraft, MeetingPlacement,
+        Person, PersonDraft, Project, ProjectDraft, StoredVoiceProfile, TranscriptSegment,
+        TranscriptSegmentBackup, VoiceProfileSummary,
     },
     error::{AppError, AppResult},
 };
@@ -55,9 +55,21 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS folders (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                parent_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS folders_project_idx ON folders(project_id, position);
+
             CREATE TABLE IF NOT EXISTS meetings (
                 id TEXT PRIMARY KEY,
                 project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
                 position INTEGER NOT NULL DEFAULT 0,
                 title TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'draft',
@@ -268,6 +280,12 @@ impl Database {
         if !columns.iter().any(|column| column == "deleted_at") {
             connection.execute("ALTER TABLE meetings ADD COLUMN deleted_at TEXT", [])?;
         }
+        if !columns.iter().any(|column| column == "folder_id") {
+            connection.execute(
+                "ALTER TABLE meetings ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -311,7 +329,7 @@ impl Database {
     pub fn meetings(&self) -> AppResult<Vec<Meeting>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, project_id, position, title, status, created_at, started_at, ended_at,
+            "SELECT id, project_id, folder_id, position, title, status, created_at, started_at, ended_at,
                     duration_ms, audio_directory, error_message
              FROM meetings WHERE deleted_at IS NULL
              ORDER BY CASE WHEN project_id IS NULL THEN '' ELSE project_id END, position, created_at DESC",
@@ -323,7 +341,7 @@ impl Database {
     pub fn meeting(&self, id: &str) -> AppResult<Meeting> {
         self.connection()?
             .query_row(
-                "SELECT id, project_id, position, title, status, created_at, started_at, ended_at,
+                "SELECT id, project_id, folder_id, position, title, status, created_at, started_at, ended_at,
                         duration_ms, audio_directory, error_message
                  FROM meetings WHERE id = ?1 AND deleted_at IS NULL",
                 [id],
@@ -513,11 +531,168 @@ impl Database {
         Ok(())
     }
 
+    pub fn folders(&self) -> AppResult<Vec<Folder>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, project_id, parent_id, name, position, created_at
+             FROM folders ORDER BY position, created_at",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Folder {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                name: row.get(3)?,
+                position: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    fn folder(&self, id: &str) -> AppResult<Folder> {
+        self.folders()?
+            .into_iter()
+            .find(|folder| folder.id == id)
+            .ok_or(AppError::NotFound("Folder"))
+    }
+
+    pub fn create_folder(&self, draft: FolderDraft) -> AppResult<Folder> {
+        let name = required_text(draft.name, "Folder name")?;
+        let connection = self.connection()?;
+        if let Some(parent_id) = draft.parent_id.as_deref() {
+            let parent_project: Option<String> = connection
+                .query_row(
+                    "SELECT project_id FROM folders WHERE id = ?1",
+                    [parent_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if parent_project.as_deref() != Some(draft.project_id.as_str()) {
+                return Err(AppError::NotFound("Folder"));
+            }
+        }
+        let position: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM folders WHERE project_id = ?1 AND parent_id IS ?2",
+            params![draft.project_id, draft.parent_id],
+            |row| row.get(0),
+        )?;
+        let folder = Folder {
+            id: Uuid::new_v4().to_string(),
+            project_id: draft.project_id,
+            parent_id: draft.parent_id,
+            name,
+            position,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        connection.execute(
+            "INSERT INTO folders(id, project_id, parent_id, name, position, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                folder.id,
+                folder.project_id,
+                folder.parent_id,
+                folder.name,
+                folder.position,
+                folder.created_at
+            ],
+        )?;
+        Ok(folder)
+    }
+
+    pub fn rename_folder(&self, id: &str, name: String) -> AppResult<Folder> {
+        let name = required_text(name, "Folder name")?;
+        if self.connection()?.execute(
+            "UPDATE folders SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )? == 0
+        {
+            return Err(AppError::NotFound("Folder"));
+        }
+        self.folder(id)
+    }
+
+    pub fn move_folder(&self, id: &str, parent_id: Option<String>) -> AppResult<Folder> {
+        let folders = self.folders()?;
+        let folder = folders
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .ok_or(AppError::NotFound("Folder"))?;
+        if let Some(target_id) = parent_id.as_deref() {
+            // The target must live in the same project and must not be the
+            // folder itself or one of its descendants.
+            let mut cursor = Some(target_id.to_string());
+            while let Some(current) = cursor {
+                if current == id {
+                    return Err(AppError::Validation(
+                        "A folder cannot be moved inside itself".to_string(),
+                    ));
+                }
+                cursor = folders
+                    .iter()
+                    .find(|candidate| candidate.id == current)
+                    .ok_or(AppError::NotFound("Folder"))?
+                    .parent_id
+                    .clone();
+            }
+            let target = folders
+                .iter()
+                .find(|candidate| candidate.id == target_id)
+                .ok_or(AppError::NotFound("Folder"))?;
+            if target.project_id != folder.project_id {
+                return Err(AppError::Validation(
+                    "Folders can only be moved within their project".to_string(),
+                ));
+            }
+        }
+        let connection = self.connection()?;
+        let position: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM folders WHERE project_id = ?1 AND parent_id IS ?2 AND id != ?3",
+            params![folder.project_id, parent_id, id],
+            |row| row.get(0),
+        )?;
+        connection.execute(
+            "UPDATE folders SET parent_id = ?1, position = ?2 WHERE id = ?3",
+            params![parent_id, position, id],
+        )?;
+        self.folder(id)
+    }
+
+    pub fn delete_folder(&self, id: &str) -> AppResult<()> {
+        let folder = self.folder(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        // Contents move up one level instead of disappearing with the folder.
+        let meeting_offset: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM meetings
+             WHERE project_id IS ?1 AND folder_id IS ?2 AND deleted_at IS NULL",
+            params![folder.project_id, folder.parent_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "UPDATE meetings SET folder_id = ?1, position = position + ?2 WHERE folder_id = ?3",
+            params![folder.parent_id, meeting_offset, id],
+        )?;
+        let folder_offset: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM folders WHERE project_id = ?1 AND parent_id IS ?2 AND id != ?3",
+            params![folder.project_id, folder.parent_id, id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "UPDATE folders SET parent_id = ?1, position = position + ?2 WHERE parent_id = ?3",
+            params![folder.parent_id, folder_offset, id],
+        )?;
+        transaction.execute("DELETE FROM folders WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn create_meeting(&self, draft: MeetingDraft) -> AppResult<Meeting> {
         let title = required_text(draft.title, "Meeting title")?;
         let meeting = Meeting {
             id: Uuid::new_v4().to_string(),
             project_id: draft.project_id,
+            folder_id: None,
             position: 0,
             title,
             status: "draft".to_string(),
@@ -532,7 +707,7 @@ impl Database {
         let transaction = connection.transaction()?;
         transaction.execute(
             "UPDATE meetings SET position = position + 1
-             WHERE project_id IS ?1 AND deleted_at IS NULL",
+             WHERE project_id IS ?1 AND folder_id IS NULL AND deleted_at IS NULL",
             params![meeting.project_id],
         )?;
         transaction.execute(
@@ -563,12 +738,12 @@ impl Database {
         let connection = self.connection()?;
         let position: i64 = connection.query_row(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM meetings
-             WHERE project_id IS ?1 AND deleted_at IS NULL",
+             WHERE project_id IS ?1 AND folder_id IS NULL AND deleted_at IS NULL",
             params![project_id],
             |row| row.get(0),
         )?;
         connection.execute(
-            "UPDATE meetings SET project_id = ?1, position = ?2 WHERE id = ?3",
+            "UPDATE meetings SET project_id = ?1, folder_id = NULL, position = ?2 WHERE id = ?3",
             params![project_id, position, id],
         )?;
         self.meeting(id)
@@ -578,10 +753,27 @@ impl Database {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         for placement in placements {
+            if let Some(folder_id) = placement.folder_id.as_deref() {
+                let folder_project: Option<String> = transaction
+                    .query_row(
+                        "SELECT project_id FROM folders WHERE id = ?1",
+                        [folder_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if folder_project.as_deref() != placement.project_id.as_deref() {
+                    return Err(AppError::NotFound("Folder"));
+                }
+            }
             if transaction.execute(
-                "UPDATE meetings SET project_id = ?1, position = ?2
-                 WHERE id = ?3 AND deleted_at IS NULL",
-                params![placement.project_id, placement.position, placement.id],
+                "UPDATE meetings SET project_id = ?1, folder_id = ?2, position = ?3
+                 WHERE id = ?4 AND deleted_at IS NULL",
+                params![
+                    placement.project_id,
+                    placement.folder_id,
+                    placement.position,
+                    placement.id
+                ],
             )? != 1
             {
                 return Err(AppError::NotFound("Meeting"));
@@ -1208,15 +1400,16 @@ fn map_meeting(row: &rusqlite::Row<'_>) -> rusqlite::Result<Meeting> {
     Ok(Meeting {
         id: row.get(0)?,
         project_id: row.get(1)?,
-        position: row.get(2)?,
-        title: row.get(3)?,
-        status: row.get(4)?,
-        created_at: row.get(5)?,
-        started_at: row.get(6)?,
-        ended_at: row.get(7)?,
-        duration_ms: row.get(8)?,
-        audio_directory: row.get(9)?,
-        error_message: row.get(10)?,
+        folder_id: row.get(2)?,
+        position: row.get(3)?,
+        title: row.get(4)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        started_at: row.get(7)?,
+        ended_at: row.get(8)?,
+        duration_ms: row.get(9)?,
+        audio_directory: row.get(10)?,
+        error_message: row.get(11)?,
     })
 }
 
@@ -1526,11 +1719,13 @@ mod tests {
                 MeetingPlacement {
                     id: first.id.clone(),
                     project_id: Some(project.id.clone()),
+                    folder_id: None,
                     position: 0,
                 },
                 MeetingPlacement {
                     id: second.id.clone(),
                     project_id: Some(project.id.clone()),
+                    folder_id: None,
                     position: 1,
                 },
             ])
@@ -1541,6 +1736,63 @@ mod tests {
         assert_eq!(meetings[0].position, 0);
         assert_eq!(meetings[1].id, second.id);
         assert_eq!(meetings[1].position, 1);
+    }
+
+    #[test]
+    fn nests_folders_and_relocates_contents_when_a_folder_is_deleted() {
+        let (_directory, database) = database();
+        let project = database
+            .create_project(ProjectDraft {
+                name: "Leads".to_string(),
+            })
+            .expect("project");
+        let parent = database
+            .create_folder(FolderDraft {
+                project_id: project.id.clone(),
+                parent_id: None,
+                name: "2026".to_string(),
+            })
+            .expect("parent folder");
+        let child = database
+            .create_folder(FolderDraft {
+                project_id: project.id.clone(),
+                parent_id: Some(parent.id.clone()),
+                name: "August".to_string(),
+            })
+            .expect("child folder");
+        let meeting = database
+            .create_meeting(MeetingDraft {
+                title: "Leads 2026-8-26".to_string(),
+                project_id: Some(project.id.clone()),
+            })
+            .expect("meeting");
+        database
+            .reorder_meetings(vec![MeetingPlacement {
+                id: meeting.id.clone(),
+                project_id: Some(project.id.clone()),
+                folder_id: Some(child.id.clone()),
+                position: 0,
+            }])
+            .expect("move meeting into folder");
+
+        assert!(database
+            .move_folder(&parent.id, Some(child.id.clone()))
+            .is_err());
+
+        database.delete_folder(&child.id).expect("delete folder");
+        let meetings = database.meetings().expect("meetings");
+        assert_eq!(
+            meetings[0].folder_id.as_deref(),
+            Some(parent.id.as_str()),
+            "meeting should move up to the deleted folder's parent"
+        );
+        assert_eq!(database.folders().expect("folders").len(), 1);
+
+        database.delete_project(&project.id).expect("delete project");
+        let meetings = database.meetings().expect("meetings");
+        assert_eq!(meetings[0].project_id, None);
+        assert_eq!(meetings[0].folder_id, None);
+        assert!(database.folders().expect("folders").is_empty());
     }
 
     #[test]

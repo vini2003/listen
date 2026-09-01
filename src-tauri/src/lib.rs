@@ -20,9 +20,9 @@ use audio::RecordingManager;
 use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
-    AppSettings, AssistantContext, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person,
-    PersonDraft, Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
-    WorkspaceSnapshot,
+    AppSettings, AssistantContext, ChatMessage, Folder, FolderDraft, Meeting, MeetingDraft,
+    MeetingPlacement, Person, PersonDraft, Project, ProjectDraft, RecordingLevels,
+    RecordingRequest, TranscriptSegmentBackup, WorkspaceSnapshot,
 };
 use error::{AppError, AppResult};
 use parking_lot::Mutex;
@@ -87,6 +87,7 @@ fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
 
     Ok(WorkspaceSnapshot {
         projects: state.database.projects()?,
+        folders: state.database.folders()?,
         meetings: state.database.meetings()?,
         people: state.database.people()?,
         segments: Vec::new(),
@@ -259,6 +260,30 @@ fn delete_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
 #[tauri::command]
 fn reorder_projects(state: State<'_, AppState>, ids: Vec<String>) -> AppResult<()> {
     state.database.reorder_projects(ids)
+}
+
+#[tauri::command]
+fn create_folder(state: State<'_, AppState>, draft: FolderDraft) -> AppResult<Folder> {
+    state.database.create_folder(draft)
+}
+
+#[tauri::command]
+fn rename_folder(state: State<'_, AppState>, id: String, name: String) -> AppResult<Folder> {
+    state.database.rename_folder(&id, name)
+}
+
+#[tauri::command]
+fn move_folder(
+    state: State<'_, AppState>,
+    id: String,
+    parent_id: Option<String>,
+) -> AppResult<Folder> {
+    state.database.move_folder(&id, parent_id)
+}
+
+#[tauri::command]
+fn delete_folder(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.database.delete_folder(&id)
 }
 
 #[tauri::command]
@@ -835,6 +860,10 @@ pub fn run() {
             rename_project,
             delete_project,
             reorder_projects,
+            create_folder,
+            rename_folder,
+            move_folder,
+            delete_folder,
             create_meeting,
             rename_meeting,
             move_meeting,

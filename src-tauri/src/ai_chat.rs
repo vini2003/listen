@@ -467,6 +467,7 @@ mod tests {
         let meeting = Meeting {
             id: "meeting".to_string(),
             project_id: None,
+            folder_id: None,
             position: 0,
             title: "Planning".to_string(),
             status: "ready".to_string(),
