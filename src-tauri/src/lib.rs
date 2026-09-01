@@ -637,6 +637,21 @@ fn load_segment_audio(
 }
 
 #[tauri::command]
+async fn export_meeting_audio(state: State<'_, AppState>, meeting_id: String) -> AppResult<String> {
+    let meeting = state.database.meeting(&meeting_id)?;
+    let directory = meeting
+        .audio_directory
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::Validation("This recording has no saved audio".to_string()))?;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        speech_audio::export_mixed_recording(&directory)
+    })
+    .await
+    .map_err(|error| AppError::Audio(format!("Could not export meeting audio: {error}")))??;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 fn load_chat_messages(
     state: State<'_, AppState>,
     scope_type: String,
@@ -877,6 +892,7 @@ pub fn run() {
             recording_levels,
             transcribe_meeting,
             load_segment_audio,
+            export_meeting_audio,
             load_chat_messages,
             complete_chat,
         ])

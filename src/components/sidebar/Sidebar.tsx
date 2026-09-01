@@ -13,6 +13,7 @@ import {
 import { AnimatePresence, motion, Reorder } from "framer-motion";
 import {
   Fragment,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -23,6 +24,7 @@ import {
   type MouseEvent,
 } from "react";
 import type { Meeting, Project } from "../../domain/models";
+import { useDismissableLayer, type DismissReason } from "../../hooks/useDismissableLayer";
 import { moveMenuFocus } from "../../lib/focus";
 import { meaningfulMeetingDrop, type MeetingDropSpot } from "../../lib/meetingDrop";
 import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
@@ -87,7 +89,13 @@ export function Sidebar({
   const [renameValue, setRenameValue] = useState("");
   const [projectDeleteCandidate, setProjectDeleteCandidate] = useState<Project | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<Meeting | null>(null);
-  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const contextMenuOpen = Boolean(contextMenu || projectContextMenu);
+  const dismissContextMenus = useCallback((reason: DismissReason) => {
+    setContextMenu(null);
+    setProjectContextMenu(null);
+    if (reason === "escape") window.requestAnimationFrame(() => contextTriggerRef.current?.focus());
+  }, []);
+  const contextMenuRef = useDismissableLayer<HTMLDivElement>(contextMenuOpen, dismissContextMenus, { closeOnWindowBlur: true });
   const contextTriggerRef = useRef<HTMLElement | null>(null);
   const dragPreviewRef = useRef<HTMLDivElement | null>(null);
   const projectClickTimerRef = useRef<number | null>(null);
@@ -134,35 +142,6 @@ export function Sidebar({
     window.addEventListener("keydown", handleItemShortcut);
     return () => window.removeEventListener("keydown", handleItemShortcut);
   }, [meetings, projects, selectedMeetingId]);
-
-  useEffect(() => {
-    if (!contextMenu && !projectContextMenu) return;
-    function dismiss(event: PointerEvent): void {
-      if (!contextMenuRef.current?.contains(event.target as Node)) {
-        setContextMenu(null);
-        setProjectContextMenu(null);
-      }
-    }
-    function closeOnEscape(event: KeyboardEvent): void {
-      if (event.key === "Escape") {
-        setContextMenu(null);
-        setProjectContextMenu(null);
-        window.requestAnimationFrame(() => contextTriggerRef.current?.focus());
-      }
-    }
-    function closeOnBlur(): void {
-      setContextMenu(null);
-      setProjectContextMenu(null);
-    }
-    window.addEventListener("pointerdown", dismiss, true);
-    window.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("blur", closeOnBlur, { once: true });
-    return () => {
-      window.removeEventListener("pointerdown", dismiss, true);
-      window.removeEventListener("keydown", closeOnEscape);
-      window.removeEventListener("blur", closeOnBlur);
-    };
-  }, [contextMenu, projectContextMenu]);
 
   useEffect(() => {
     if (!contextMenu && !projectContextMenu) return;
@@ -385,10 +364,10 @@ export function Sidebar({
         className="new-recording-button"
         onClick={() => onCreateMeeting(selectedProjectId)}
         aria-keyshortcuts={shortcutAria("n")}
-        title={`New recording (${shortcutLabel("n")})`}
+        title={`New meeting (${shortcutLabel("n")})`}
       >
         <Mic size={17} />
-        <span>New recording</span>
+        <span>New meeting</span>
         <kbd>{shortcutLabel("n")}</kbd>
       </button>
 
@@ -727,6 +706,13 @@ function MeetingRow({
           onDragOver={onDragOver}
           onDrop={onDrop}
         >
+          {meeting.status === "recording" || meeting.status === "processing" || meeting.status === "failed" ? (
+            <span
+              className={`status-dot status-${meeting.status}`}
+              role="img"
+              aria-label={meeting.status === "recording" ? "Recording" : meeting.status === "processing" ? "Transcribing" : "Transcription failed"}
+            />
+          ) : null}
           <span className="meeting-row-copy"><span>{meeting.title}</span></span>
         </button>
       )}

@@ -12,6 +12,7 @@ Listen is a minimal, local-first desktop application for recording, organizing, 
 - SQLite persistence for projects, recordings, speakers, and transcript segments
 - Speaker profiles with automatic, source-isolated Precision-2 voiceprints
 - Speaker-attributed transcription through pyannoteAI `precision-2` with its default Parakeet STT model
+- Whole-meeting playback with a transport bar, plus play-from-timestamp and per-passage clips in the transcript
 - Conservative transcript cleanup through `gpt-5.6-luna` with strict structured output
 - Persistent recording- and project-scoped meeting conversations through `gpt-5.6-luna`
 - Persistent known-speaker identification through up to 50 pyannote voiceprints

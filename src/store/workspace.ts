@@ -29,6 +29,7 @@ interface WorkspaceState extends WorkspaceSnapshot {
   selectedProjectId: string | null;
   loading: boolean;
   busy: boolean;
+  segmentsLoading: boolean;
   recordingPaused: boolean;
   chatMessages: ChatMessage[];
   chatScopeKey: string | null;
@@ -68,6 +69,7 @@ interface WorkspaceState extends WorkspaceSnapshot {
   getRecordingLevels: (meetingId: string) => Promise<RecordingLevels>;
   transcribeMeeting: (meetingId: string) => Promise<boolean>;
   loadSegmentAudio: (meetingId: string, startMs: number, endMs: number) => Promise<string>;
+  loadMeetingAudioUrl: (meetingId: string) => Promise<string>;
   loadChat: (scope: ChatScope) => Promise<void>;
   completeChat: (scope: ChatScope, content: string, messageId?: string | null) => Promise<boolean>;
   undo: () => Promise<void>;
@@ -135,9 +137,12 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   async function loadSegmentsForMeeting(meetingId: string): Promise<void> {
     try {
       const segments = await desktop.loadMeetingSegments(meetingId);
-      if (get().selectedMeetingId === meetingId) set({ segments });
+      if (get().selectedMeetingId === meetingId) set({ segments, segmentsLoading: false });
     } catch (error) {
-      if (get().selectedMeetingId === meetingId) showError(error);
+      if (get().selectedMeetingId === meetingId) {
+        set({ segmentsLoading: false });
+        showError(error);
+      }
     }
   }
 
@@ -174,6 +179,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     set({
       ...snapshot,
       segments,
+      segmentsLoading: false,
       selectedMeetingId: selectedMeeting?.id ?? null,
       selectedProjectId: selectedMeeting?.projectId ?? get().selectedProjectId,
     });
@@ -302,6 +308,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     selectedProjectId: null,
     loading: true,
     busy: false,
+    segmentsLoading: false,
     recordingPaused: false,
     chatMessages: [],
     chatScopeKey: null,
@@ -322,6 +329,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         set({
           ...snapshot,
           segments,
+          segmentsLoading: false,
           selectedMeetingId,
           selectedProjectId: snapshot.meetings[0]?.projectId ?? null,
         });
@@ -355,13 +363,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
     selectMeeting(id) {
       const meeting = get().meetings.find((candidate) => candidate.id === id);
-      set({ selectedMeetingId: id, selectedProjectId: meeting?.projectId ?? null, segments: [] });
+      set({ selectedMeetingId: id, selectedProjectId: meeting?.projectId ?? null, segments: [], segmentsLoading: true });
       void loadSegmentsForMeeting(id);
       if (meeting?.status === "failed" && meeting.errorMessage) showError(meeting.errorMessage);
     },
 
     selectProject(id) {
-      set({ selectedProjectId: id, selectedMeetingId: null, segments: [] });
+      set({ selectedProjectId: id, selectedMeetingId: null, segments: [], segmentsLoading: false });
     },
 
     async createProject(draft) {
@@ -439,6 +447,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
               : meeting),
           ],
           segments: [],
+          segmentsLoading: false,
           selectedMeetingId: created.id,
           selectedProjectId: created.projectId,
         }));
@@ -488,6 +497,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           meetings: remaining,
           ...(deletingSelected ? {
             segments: [],
+            segmentsLoading: nextMeeting !== null,
             selectedMeetingId: nextMeeting?.id ?? null,
             selectedProjectId: nextMeeting?.projectId ?? null,
           } : {}),
@@ -727,6 +737,15 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async loadSegmentAudio(meetingId, startMs, endMs) {
       try {
         return await desktop.loadSegmentAudio(meetingId, startMs, endMs);
+      } catch (error) {
+        showError(error);
+        throw error;
+      }
+    },
+
+    async loadMeetingAudioUrl(meetingId) {
+      try {
+        return await desktop.loadMeetingAudioUrl(meetingId);
       } catch (error) {
         showError(error);
         throw error;

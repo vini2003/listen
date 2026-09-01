@@ -3,6 +3,7 @@ import {
   Check,
   ChevronUp,
   Copy,
+  KeyRound,
   LoaderCircle,
   PanelRightClose,
   Pencil,
@@ -44,6 +45,7 @@ import {
   type AssistantReference,
 } from "../../services/assistantWindow";
 import { useWorkspace } from "../../store/workspace";
+import type { SettingsSection } from "../dialogs/SettingsDialog";
 
 interface MeetingChatProps {
   meeting: Meeting;
@@ -52,6 +54,8 @@ interface MeetingChatProps {
   onWidePanelResizeEnd?: (width: number) => void;
   mode?: "embedded" | "detached";
   onOpenRecordingReference?: (reference: AssistantReference) => void;
+  onOpenSettings?: (section?: SettingsSection) => void;
+  onPanelClearanceChange?: (px: number) => void;
 }
 
 const ReactMarkdown = lazy(() => import("react-markdown"));
@@ -64,6 +68,8 @@ export function MeetingChat({
   onWidePanelResizeEnd = () => {},
   mode = "embedded",
   onOpenRecordingReference,
+  onOpenSettings,
+  onPanelClearanceChange,
 }: MeetingChatProps) {
   const {
     settings,
@@ -166,9 +172,19 @@ export function MeetingChat({
 
   useEffect(() => resizeTextarea(textareaRef.current), [draft]);
 
+  useEffect(() => {
+    if (!onPanelClearanceChange) return;
+    const floating = mode === "embedded" && !wideLayout && !detachedToWindow && expanded;
+    onPanelClearanceChange(floating ? panelHeight + 150 : 0);
+  }, [detachedToWindow, expanded, mode, onPanelClearanceChange, panelHeight, wideLayout]);
+
   async function sendMessage(): Promise<void> {
     const content = draft.trim();
-    if (!content || chatBusy || !settings.apiKeyConfigured) return;
+    if (!content || chatBusy) return;
+    if (!settings.apiKeyConfigured) {
+      onOpenSettings?.("text-model");
+      return;
+    }
     setExpanded(true);
     setDraft("");
     await completeChat(scope, content);
@@ -537,7 +553,7 @@ export function MeetingChat({
           autoFocus={mode === "detached"}
           placeholder={settings.apiKeyConfigured
             ? "Ask about this meeting…"
-            : "Add a text model API key in Settings…"}
+            : "Ask needs a text model API key…"}
           onFocus={() => setExpanded(true)}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => handleComposerKeyDown(event, sendMessage)}
@@ -545,14 +561,25 @@ export function MeetingChat({
           aria-keyshortcuts={shortcutAria("k")}
           title={`Focus Ask (${shortcutLabel("k")})`}
         />
-        <button
-          className="chat-send-button"
-          onClick={() => void sendMessage()}
-          disabled={!draft.trim() || chatBusy || !settings.apiKeyConfigured}
-          aria-label="Send question"
-        >
-          <Send size={16} />
-        </button>
+        {!settings.apiKeyConfigured && onOpenSettings ? (
+          <button
+            className="chat-send-button"
+            onClick={() => onOpenSettings("text-model")}
+            title="Add a text model API key"
+            aria-label="Add a text model API key in Settings"
+          >
+            <KeyRound size={15} />
+          </button>
+        ) : (
+          <button
+            className="chat-send-button"
+            onClick={() => void sendMessage()}
+            disabled={!draft.trim() || chatBusy || !settings.apiKeyConfigured}
+            aria-label="Send question"
+          >
+            <Send size={16} />
+          </button>
+        )}
       </div>
     </section>
   );

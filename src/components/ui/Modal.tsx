@@ -1,6 +1,13 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
-import { useEffect, useId, useRef, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createContext, useEffect, useId, useRef, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { EASE_STANDARD } from "../../lib/motion";
+
+/** True while the nearest enclosing Modal is open; stays reachable inside AnimatePresence's frozen exit subtree. */
+export const ModalOpenContext = createContext(true);
+
+/* Stacked dialogs each listen for Escape on window; only the topmost may close. */
+const openModalStack: symbol[] = [];
 
 interface ModalProps {
   open: boolean;
@@ -10,21 +17,27 @@ interface ModalProps {
   onClose: () => void;
   size?: "small" | "medium" | "large";
   dismissible?: boolean;
+  initialFocus?: { readonly current: HTMLElement | null };
 }
 
-export function Modal({ open, title, description, children, onClose, size = "medium", dismissible = true }: ModalProps) {
+export function Modal({ open, title, description, children, onClose, size = "medium", dismissible = true, initialFocus }: ModalProps) {
   const titleId = useId();
   const descriptionId = useId();
   const cardRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const stackIdRef = useRef<symbol | null>(null);
+  if (stackIdRef.current === null) stackIdRef.current = Symbol("modal");
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
+    const stackId = stackIdRef.current!;
+    openModalStack.push(stackId);
     returnFocusRef.current = document.activeElement as HTMLElement | null;
 
     function closeOnEscape(event: KeyboardEvent): void {
+      if (openModalStack[openModalStack.length - 1] !== stackId) return;
       if (dismissible && event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
@@ -34,9 +47,11 @@ export function Modal({ open, title, description, children, onClose, size = "med
     window.addEventListener("keydown", closeOnEscape);
     const focusFrame = window.requestAnimationFrame(() => {
       if (cardRef.current?.contains(document.activeElement)) return;
-      firstFocusable(cardRef.current)?.focus();
+      (initialFocus?.current ?? firstFocusable(cardRef.current))?.focus();
     });
     return () => {
+      const stackIndex = openModalStack.indexOf(stackId);
+      if (stackIndex >= 0) openModalStack.splice(stackIndex, 1);
       window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("keydown", closeOnEscape);
       const returnTarget = returnFocusRef.current;
@@ -60,13 +75,15 @@ export function Modal({ open, title, description, children, onClose, size = "med
   }
 
   return (
-    <AnimatePresence>
-      {open ? (
+    <ModalOpenContext.Provider value={open}>
+      <AnimatePresence>
+        {open ? (
         <motion.div
           className="modal-backdrop"
           initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
+          animate={{ opacity: 1, pointerEvents: "auto" as const }}
+          exit={{ opacity: 0, pointerEvents: "none" as const }}
+          transition={{ duration: 0.16, ease: EASE_STANDARD }}
           onMouseDown={(event) => dismissible && event.currentTarget === event.target && onClose()}
         >
           <motion.section
@@ -80,7 +97,7 @@ export function Modal({ open, title, description, children, onClose, size = "med
             initial={{ opacity: 0, y: 12, scale: 0.985 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.99 }}
-            transition={{ duration: 0.16, ease: [0.2, 0.8, 0.2, 1] }}
+            transition={{ duration: 0.16, ease: EASE_STANDARD }}
           >
             <header className="modal-header">
               <div>
@@ -92,8 +109,9 @@ export function Modal({ open, title, description, children, onClose, size = "med
             {children}
           </motion.section>
         </motion.div>
-      ) : null}
-    </AnimatePresence>
+        ) : null}
+      </AnimatePresence>
+    </ModalOpenContext.Provider>
   );
 }
 

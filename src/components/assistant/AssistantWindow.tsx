@@ -6,6 +6,7 @@ import {
   listenForAssistantEvent,
   openReferenceInMain,
 } from "../../services/assistantWindow";
+import { watchTheme } from "../../lib/theme";
 import { desktop } from "../../services/desktop";
 import { useWorkspace } from "../../store/workspace";
 import { MeetingChat } from "../meeting/MeetingChat";
@@ -77,9 +78,8 @@ export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
   }, [loadContext, meetingId]);
 
   useEffect(() => {
-    const theme = context?.settings.theme ?? "system";
-    document.documentElement.dataset.theme = theme;
     document.title = context ? `Ask — ${context.meeting.title}` : "Ask — Listen";
+    return watchTheme(context?.settings.theme ?? "system");
   }, [context]);
 
   if (loading) {

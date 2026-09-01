@@ -1,7 +1,33 @@
-import type { TranscriptSegment } from "../domain/models";
+import type { MeetingStatus, TranscriptSegment } from "../domain/models";
 
 const MAX_TURN_GAP_MS = 30_000;
 const MAX_TURN_DURATION_MS = 5 * 60_000;
+
+export type TranscriptStateKind =
+  | "transcript"
+  | "loading"
+  | "recording"
+  | "processing"
+  | "failed"
+  | "awaiting-key"
+  | "ready-to-transcribe"
+  | "empty";
+
+export function transcriptStateFor(input: {
+  status: MeetingStatus;
+  durationMs: number;
+  hasTranscript: boolean;
+  segmentsLoading: boolean;
+  pyannoteKeyConfigured: boolean;
+}): TranscriptStateKind {
+  if (input.hasTranscript) return "transcript";
+  if (input.segmentsLoading) return "loading";
+  if (input.status === "recording") return "recording";
+  if (input.status === "processing") return "processing";
+  if (input.status === "failed") return "failed";
+  if (input.durationMs > 0) return input.pyannoteKeyConfigured ? "ready-to-transcribe" : "awaiting-key";
+  return "empty";
+}
 
 export interface TranscriptTurn extends TranscriptSegment {
   sourceSegmentIds: string[];

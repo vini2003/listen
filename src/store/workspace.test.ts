@@ -85,4 +85,40 @@ describe("workspace loading", () => {
     expect(service.loadWorkspace).toHaveBeenCalledTimes(1);
     expect(useWorkspace.getState().projects).toContainEqual(project);
   });
+
+  it("tracks segment loading while switching meetings", async () => {
+    await useWorkspace.getState().load();
+    expect(useWorkspace.getState().segmentsLoading).toBe(false);
+
+    let releaseSegments!: (segments: TranscriptSegment[]) => void;
+    service.loadMeetingSegments.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseSegments = resolve; }),
+    );
+
+    useWorkspace.getState().selectMeeting("meeting-2");
+    expect(useWorkspace.getState().segmentsLoading).toBe(true);
+    expect(useWorkspace.getState().segments).toEqual([]);
+
+    releaseSegments([]);
+    await vi.waitFor(() => expect(useWorkspace.getState().segmentsLoading).toBe(false));
+  });
+
+  it("ignores stale segment responses after a second selection", async () => {
+    await useWorkspace.getState().load();
+
+    let releaseStale!: (segments: TranscriptSegment[]) => void;
+    service.loadMeetingSegments.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseStale = resolve; }),
+    );
+
+    useWorkspace.getState().selectMeeting("meeting-2");
+    useWorkspace.getState().selectMeeting(firstMeeting.id);
+    await vi.waitFor(() => expect(useWorkspace.getState().segmentsLoading).toBe(false));
+    expect(useWorkspace.getState().segments).toEqual([selectedSegment]);
+
+    releaseStale([{ ...selectedSegment, id: "stale", meetingId: "meeting-2" }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(useWorkspace.getState().segments).toEqual([selectedSegment]);
+    expect(useWorkspace.getState().segmentsLoading).toBe(false);
+  });
 });

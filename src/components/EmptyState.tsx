@@ -8,7 +8,7 @@ interface EmptyStateProps {
 
 export function EmptyState({ onCreateProject, onCreateMeeting }: EmptyStateProps) {
   return (
-    <motion.main className="welcome-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+    <motion.main className="welcome-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.18 }}>
       <div className="welcome-mark"><AudioLines size={28} /></div>
       <h1>Conversations, remembered.</h1>
       <p>Record meetings, identify the people in them, and keep every useful thought close at hand.</p>

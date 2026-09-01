@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AssistantContext,
   AppSettings,
@@ -16,6 +16,8 @@ import type {
   TranscriptSegmentBackup,
   WorkspaceSnapshot,
 } from "../domain/models";
+import { PRIVACY_NOTICE_VERSION } from "../domain/privacy";
+import { MAX_PLAYBACK_MS, silentWavDataUrl } from "../lib/previewAudio";
 
 export interface RecordingRequest {
   meetingId: string;
@@ -60,6 +62,7 @@ export interface DesktopService {
   recordingLevels(meetingId: string): Promise<RecordingLevels>;
   transcribeMeeting(meetingId: string): Promise<Meeting>;
   loadSegmentAudio(meetingId: string, startMs: number, endMs: number): Promise<string>;
+  loadMeetingAudioUrl(meetingId: string): Promise<string>;
   loadChatMessages(scope: ChatScope): Promise<ChatMessage[]>;
   completeChat(scope: ChatScope, content: string, messageId?: string | null, clientMessageId?: string | null): Promise<ChatMessage[]>;
 }
@@ -106,6 +109,8 @@ const tauriService: DesktopService = {
   transcribeMeeting: (meetingId) => invoke("transcribe_meeting", { meetingId }),
   loadSegmentAudio: (meetingId, startMs, endMs) =>
     invoke("load_segment_audio", { meetingId, startMs, endMs }),
+  loadMeetingAudioUrl: async (meetingId) =>
+    convertFileSrc(await invoke("export_meeting_audio", { meetingId })),
   loadChatMessages: ({ scopeType, scopeId }) =>
     invoke("load_chat_messages", { scopeType, scopeId }),
   completeChat: ({ scopeType, scopeId }, content, messageId = null, clientMessageId = null) =>
@@ -289,7 +294,7 @@ function createBrowserPreviewService(): DesktopService {
       persist();
     },
     async acknowledgePrivacyNotice(enableVoiceIdentification) {
-      snapshot.settings.privacyNoticeVersion = "2026-08-14";
+      snapshot.settings.privacyNoticeVersion = PRIVACY_NOTICE_VERSION;
       snapshot.settings.speakerIdentificationEnabled = enableVoiceIdentification;
       snapshot.settings.biometricConsentAcceptedAt = enableVoiceIdentification ? new Date().toISOString() : null;
       persist();
@@ -387,8 +392,17 @@ function createBrowserPreviewService(): DesktopService {
       await new Promise((resolve) => window.setTimeout(resolve, 900));
       return mutateMeeting(meetingId, { status: "ready" });
     },
-    async loadSegmentAudio() {
-      throw new Error("Audio playback is available in the desktop app.");
+    async loadSegmentAudio(_meetingId, startMs, endMs) {
+      if (startMs < 0 || endMs <= startMs) throw new Error("Invalid playback range.");
+      if (endMs - startMs > MAX_PLAYBACK_MS) throw new Error("Playback clips are limited to 5 minutes.");
+      return silentWavDataUrl(endMs - startMs);
+    },
+    async loadMeetingAudioUrl(meetingId) {
+      const meeting = snapshot.meetings.find((candidate) => candidate.id === meetingId);
+      if (!meeting || meeting.durationMs <= 0 || !meeting.audioDirectory) {
+        throw new Error("This recording has no saved audio");
+      }
+      return silentWavDataUrl(meeting.durationMs);
     },
     async loadChatMessages(scope) {
       return structuredClone(chatMessages.filter(
@@ -496,7 +510,11 @@ function readPreviewState(): WorkspaceSnapshot {
       segment.identitySource ??= segment.personId ? "manual" : null;
       segment.identityConfidence ??= null;
     });
-    snapshot.meetings.forEach((meeting, index) => (meeting.position ??= index));
+    snapshot.meetings.forEach((meeting, index) => {
+      meeting.position ??= index;
+      // A capture can't survive a page reload; normalize sessions interrupted mid-recording.
+      if (meeting.status === "recording") meeting.status = meeting.durationMs > 0 ? "ready" : "draft";
+    });
     snapshot.devices = snapshot.devices.map((device) => device.kind === "system"
       ? {
           ...device,
