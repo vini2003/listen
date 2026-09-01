@@ -47,6 +47,12 @@ export function mergeSequentialSegments(segments: TranscriptSegment[]): Transcri
       previous.endMs = Math.max(previous.endMs, segment.endMs);
       previous.text = joinText(previous.text, segment.text);
       previous.sourceSegmentIds.push(segment.id);
+      // A turn mixing manual and auto segments counts as manual: the person
+      // confirmed part of it, so no "labeled automatically" badge is shown.
+      if (segment.identitySource === "manual" && previous.identitySource !== "manual") {
+        previous.identitySource = "manual";
+        previous.identityConfidence = null;
+      }
       continue;
     }
     turns.push({ ...segment, sourceSegmentIds: [segment.id] });

@@ -109,8 +109,17 @@ pub async fn transcribe_meeting(
     // identification slots first; everyone else with a learned voiceprint fills
     // the remaining slots, most recently matched first.
     let priority_ids = priority_candidate_ids(database, &meeting, &settings)?;
-    let (priority_profiles, general_profiles): (Vec<_>, Vec<_>) = database
-        .voice_profiles()?
+    let all_profiles = database.voice_profiles()?;
+    // "Label this person automatically" off also turns off local-microphone attribution.
+    let local_speaker_disabled = settings
+        .local_speaker_person_id
+        .as_ref()
+        .is_some_and(|person_id| {
+            all_profiles
+                .iter()
+                .any(|profile| &profile.person_id == person_id && profile.status == "disabled")
+        });
+    let (priority_profiles, general_profiles): (Vec<_>, Vec<_>) = all_profiles
         .into_iter()
         .filter(|profile| profile.status == "ready")
         .partition(|profile| priority_ids.contains(&profile.person_id));
@@ -220,13 +229,17 @@ pub async fn transcribe_meeting(
             let start_ms = seconds_to_ms(turn.start);
             let end_ms = seconds_to_ms(turn.end).max(start_ms + 1);
             let manual_person = person_from_manual_overlap(&existing_segments, start_ms, end_ms);
-            let local_person = local_microphone_person(
-                &audio_directory,
-                &settings,
-                &active_sources,
-                start_ms,
-                end_ms,
-            );
+            let local_person = if local_speaker_disabled {
+                None
+            } else {
+                local_microphone_person(
+                    &audio_directory,
+                    &settings,
+                    &active_sources,
+                    start_ms,
+                    end_ms,
+                )
+            };
             let voice_identity = cluster_identities.get(&turn.speaker);
             let (person_id, identity_source, identity_confidence) =
                 if let Some(person_id) = manual_person {
@@ -266,6 +279,24 @@ pub async fn transcribe_meeting(
                 && segment.identity_source.as_deref() == Some("local_microphone")
         }) {
             decision.reason = "local_microphone".to_string();
+        }
+    }
+    // People can be deleted while the paid transcription jobs run; a stale id
+    // would violate the person_id foreign key and roll back the whole insert.
+    let fresh_person_ids = database
+        .people()?
+        .into_iter()
+        .map(|person| person.id)
+        .collect::<HashSet<_>>();
+    for segment in &mut segments {
+        if segment
+            .person_id
+            .as_ref()
+            .is_some_and(|person_id| !fresh_person_ids.contains(person_id))
+        {
+            segment.person_id = None;
+            segment.identity_source = None;
+            segment.identity_confidence = None;
         }
     }
     database.replace_segments(meeting_id, segments.clone())?;

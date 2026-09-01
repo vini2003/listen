@@ -44,7 +44,7 @@ export interface DesktopService {
   createPerson(draft: PersonDraft): Promise<Person>;
   updatePerson(id: string, draft: PersonDraft): Promise<Person>;
   deletePerson(id: string): Promise<void>;
-  assignSpeaker(meetingId: string, speakerLabel: string, personId: string | null): Promise<void>;
+  assignSpeaker(meetingId: string, speakerLabel: string, personId: string | null, identitySource?: TranscriptSegment["identitySource"]): Promise<void>;
   deleteTranscriptSegments(ids: string[]): Promise<TranscriptSegmentBackup[]>;
   restoreTranscriptSegments(backups: TranscriptSegmentBackup[]): Promise<void>;
   forgetVoiceProfile(personId: string): Promise<Person>;
@@ -86,8 +86,8 @@ const tauriService: DesktopService = {
   createPerson: (draft) => invoke("create_person", { draft }),
   updatePerson: (id, draft) => invoke("update_person", { id, draft }),
   deletePerson: (id) => invoke("delete_person", { id }),
-  assignSpeaker: (meetingId, speakerLabel, personId) =>
-    invoke("assign_speaker", { meetingId, speakerLabel, personId }),
+  assignSpeaker: (meetingId, speakerLabel, personId, identitySource) =>
+    invoke("assign_speaker", { meetingId, speakerLabel, personId, identitySource: identitySource ?? null }),
   deleteTranscriptSegments: (ids) => invoke("delete_transcript_segments", { ids }),
   restoreTranscriptSegments: (backups) => invoke("restore_transcript_segments", { backups }),
   forgetVoiceProfile: (personId) => invoke("forget_voice_profile", { personId }),
@@ -160,7 +160,7 @@ function createBrowserPreviewService(): DesktopService {
     },
     async findVoiceEnrollmentSegment(personId) {
       return structuredClone(snapshot.segments
-        .filter((segment) => segment.personId === personId)
+        .filter((segment) => segment.personId === personId && segment.identitySource === "manual")
         .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))[0] ?? null);
     },
     async createProject(draft) {
@@ -264,10 +264,11 @@ function createBrowserPreviewService(): DesktopService {
       );
       persist();
     },
-    async assignSpeaker(meetingId, speakerLabel, personId) {
+    async assignSpeaker(meetingId, speakerLabel, personId, identitySource) {
+      const resolvedSource = personId ? identitySource ?? "manual" : null;
       snapshot.segments = snapshot.segments.map((segment) =>
         segment.meetingId === meetingId && segment.speakerLabel === speakerLabel
-          ? { ...segment, personId }
+          ? { ...segment, personId, identitySource: resolvedSource, identityConfidence: null }
           : segment,
       );
       persist();

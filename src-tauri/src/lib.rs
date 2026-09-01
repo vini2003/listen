@@ -341,10 +341,11 @@ fn assign_speaker(
     meeting_id: String,
     speaker_label: String,
     person_id: Option<String>,
+    identity_source: Option<String>,
 ) -> AppResult<()> {
     state
         .database
-        .assign_speaker(&meeting_id, &speaker_label, person_id)
+        .assign_speaker(&meeting_id, &speaker_label, person_id, identity_source)
 }
 
 #[tauri::command]
@@ -480,8 +481,7 @@ fn update_settings(
 ) -> AppResult<AppSettings> {
     settings.api_key_configured = credentials::has_openai_key()?;
     settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
-    state.database.update_settings(&settings)?;
-    Ok(settings)
+    state.database.update_settings(&settings)
 }
 
 #[tauri::command]

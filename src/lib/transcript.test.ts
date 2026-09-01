@@ -84,3 +84,20 @@ describe("transcriptStateFor", () => {
     expect(transcriptStateFor({ ...base, status: "draft", durationMs: 0 })).toBe("empty");
   });
 });
+
+describe("merged turn identity source", () => {
+  it("treats a turn as manual when any merged segment was manually confirmed", () => {
+    const auto = { ...segment("s1", "A", 0, "Hello"), personId: "p1", identitySource: "voiceprint" as const, identityConfidence: 91 };
+    const manual = { ...segment("s2", "A", 2_000, "again"), personId: "p1", identitySource: "manual" as const };
+    const [turn] = mergeSequentialSegments([auto, manual]);
+    expect(turn.identitySource).toBe("manual");
+    expect(turn.identityConfidence).toBeNull();
+  });
+
+  it("keeps the auto source when no segment is manual", () => {
+    const first = { ...segment("s1", "A", 0, "Hello"), personId: "p1", identitySource: "voiceprint" as const, identityConfidence: 91 };
+    const second = { ...segment("s2", "A", 2_000, "again"), personId: "p1", identitySource: "voiceprint" as const, identityConfidence: 84 };
+    const [turn] = mergeSequentialSegments([first, second]);
+    expect(turn.identitySource).toBe("voiceprint");
+  });
+});

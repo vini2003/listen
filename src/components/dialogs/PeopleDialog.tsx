@@ -103,7 +103,7 @@ export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
               {editing !== "new" ? (
                 <div className="voice-profile-card">
                   <div className="voice-profile-heading"><span><Fingerprint size={17} /></span><div><strong>Voice identification</strong><p>{voiceProfileDescription(editing)}</p></div><span className={`voice-profile-status status-${editing.voiceProfile?.status ?? "off"}`}>{voiceProfileLabel(editing)}</span></div>
-                  <label className="settings-toggle voice-labeling-toggle"><input type="checkbox" checked={editing.voiceProfile?.status !== "disabled"} onChange={(event) => void (event.target.checked ? enableVoiceLabeling(editing.id) : eraseVoiceProfile(editing.id))} /><span><Sparkles size={14} /> Label this person automatically</span></label>
+                  <label className="settings-toggle voice-labeling-toggle"><input type="checkbox" disabled={busy} checked={editing.voiceProfile?.status !== "disabled"} onChange={(event) => void (event.target.checked ? enableVoiceLabeling(editing.id) : eraseVoiceProfile(editing.id))} /><span><Sparkles size={14} /> Label this person automatically</span></label>
                   <label className="settings-toggle"><input type="checkbox" checked={settings.localSpeakerPersonId === editing.id} onChange={(event) => void updateSettings({ ...settings, localSpeakerPersonId: event.target.checked ? editing.id : null, preferLocalSpeakerForMicrophone: true })} /><span><Mic2 size={14} /> This is me on the selected microphone</span></label>
                 </div>
               ) : null}

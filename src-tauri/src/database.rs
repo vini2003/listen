@@ -433,7 +433,7 @@ impl Database {
             .map(|settings| settings.unwrap_or_default())
     }
 
-    pub fn update_settings(&self, settings: &AppSettings) -> AppResult<()> {
+    pub fn update_settings(&self, settings: &AppSettings) -> AppResult<AppSettings> {
         let mut settings = settings.clone();
         if let Some(person_id) = settings.local_speaker_person_id.as_deref() {
             let exists: bool = self.connection()?.query_row(
@@ -453,7 +453,7 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [value],
         )?;
-        Ok(())
+        Ok(settings)
     }
 
     pub fn create_project(&self, draft: ProjectDraft) -> AppResult<Project> {
@@ -845,13 +845,18 @@ impl Database {
         meeting_id: &str,
         speaker_label: &str,
         person_id: Option<String>,
+        identity_source: Option<String>,
     ) -> AppResult<()> {
+        // Undo/redo restores the recorded source so machine-attributed labels
+        // never get promoted to 'manual' (the only source enrollment learns from).
+        let identity_source = person_id
+            .as_ref()
+            .map(|_| identity_source.unwrap_or_else(|| "manual".to_string()));
         self.connection()?.execute(
             "UPDATE transcript_segments
-             SET person_id = ?1, identity_source = CASE WHEN ?1 IS NULL THEN NULL ELSE 'manual' END,
-                 identity_confidence = NULL
-             WHERE meeting_id = ?2 AND speaker_label = ?3",
-            params![person_id, meeting_id, speaker_label],
+             SET person_id = ?1, identity_source = ?2, identity_confidence = NULL
+             WHERE meeting_id = ?3 AND speaker_label = ?4",
+            params![person_id, identity_source, meeting_id, speaker_label],
         )?;
         Ok(())
     }

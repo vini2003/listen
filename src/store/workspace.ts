@@ -331,12 +331,15 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           selectedProjectId: snapshot.meetings[0]?.projectId ?? null,
         });
         if (snapshot.settings.pyannoteApiKeyConfigured) {
-          for (const person of snapshot.people) {
-            const status = person.voiceProfile?.status;
-            // No profile row means an upgrader whose labeled people never enrolled.
-            if (status !== undefined && status !== "pending_sample") continue;
-            void enrollBestAvailableAssignment(person.id);
-          }
+          // Serialized on purpose: each retry may decode and upload meeting audio.
+          void (async () => {
+            for (const person of snapshot.people) {
+              const status = person.voiceProfile?.status;
+              // No profile row means an upgrader whose labeled people never enrolled.
+              if (status !== undefined && status !== "pending_sample") continue;
+              await enrollBestAvailableAssignment(person.id);
+            }
+          })();
         }
         const selected = snapshot.meetings[0];
         if (selected?.status === "failed" && selected.errorMessage) {
@@ -549,9 +552,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async assignSpeaker(meetingId, speakerLabel, personId) {
       const selectedMeetingId = get().selectedMeetingId;
       const previousSegments = get().segments;
-      const previousPersonId = previousSegments.find(
+      const previousSegment = previousSegments.find(
         (segment) => segment.meetingId === meetingId && segment.speakerLabel === speakerLabel,
-      )?.personId ?? null;
+      );
+      const previousPersonId = previousSegment?.personId ?? null;
+      const previousIdentitySource = previousSegment?.identitySource ?? null;
       set((state) => ({
         segments: state.segments.map((segment) =>
           segment.meetingId === meetingId && segment.speakerLabel === speakerLabel
@@ -561,10 +566,22 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       try {
         await desktop.assignSpeaker(meetingId, speakerLabel, personId);
         remember({
-          undo: () => desktop.assignSpeaker(meetingId, speakerLabel, previousPersonId),
+          // Restoring the original identity source keeps machine-attributed
+          // labels out of the manual-only enrollment pool after an undo.
+          undo: () => desktop.assignSpeaker(meetingId, speakerLabel, previousPersonId, previousIdentitySource),
           redo: () => desktop.assignSpeaker(meetingId, speakerLabel, personId),
         });
-        if (personId) void enrollBestAvailableAssignment(personId);
+        if (personId) {
+          void (async () => {
+            await enrollBestAvailableAssignment(personId);
+            const profile = get().people.find((candidate) => candidate.id === personId)?.voiceProfile;
+            // The globally-longest segment can be chronically unusable
+            // (crosstalk); fall back to the passage the user just labeled.
+            if (profile?.status !== "ready" && profile?.status !== "learning") {
+              await enrollFromAssignment(meetingId, speakerLabel, personId);
+            }
+          })();
+        }
         return true;
       } catch (error) {
         if (get().selectedMeetingId === selectedMeetingId) set({ segments: previousSegments });
@@ -665,12 +682,15 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         return true;
       });
       if (result === true && apiKey.trim()) {
-        // Serialized on purpose: each retry may decode and upload meeting audio.
-        for (const person of get().people) {
-          const status = person.voiceProfile?.status;
-          if (status === "ready" || status === "learning" || status === "disabled") continue;
-          await enrollBestAvailableAssignment(person.id);
-        }
+        // Detached so saving the key resolves immediately; serialized because
+        // each retry may decode and upload meeting audio.
+        void (async () => {
+          for (const person of get().people) {
+            const status = person.voiceProfile?.status;
+            if (status === "ready" || status === "learning" || status === "disabled") continue;
+            await enrollBestAvailableAssignment(person.id);
+          }
+        })();
       }
       return result === true;
     },
