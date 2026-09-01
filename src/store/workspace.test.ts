@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Meeting, Project, TranscriptSegment, WorkspaceSnapshot } from "../domain/models";
+import type { Meeting, Person, Project, TranscriptSegment, WorkspaceSnapshot } from "../domain/models";
 
 const service = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
   loadMeetingSegments: vi.fn(),
   createProject: vi.fn(),
+  assignSpeaker: vi.fn(),
+  findVoiceEnrollmentSegment: vi.fn(),
+  enrollVoiceProfile: vi.fn(),
 }));
 
 vi.mock("../services/desktop", () => ({ desktop: service }));
@@ -51,9 +54,6 @@ const snapshot: WorkspaceSnapshot = {
     theme: "system",
     apiKeyConfigured: false,
     pyannoteApiKeyConfigured: false,
-    privacyNoticeVersion: "2026-08-14",
-    biometricConsentAcceptedAt: null,
-    speakerIdentificationEnabled: false,
     localSpeakerPersonId: null,
     preferLocalSpeakerForMicrophone: true,
   },
@@ -120,5 +120,98 @@ describe("workspace loading", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(useWorkspace.getState().segments).toEqual([selectedSegment]);
     expect(useWorkspace.getState().segmentsLoading).toBe(false);
+  });
+});
+
+describe("automatic voice enrollment", () => {
+  const person: Person = {
+    id: "person-1",
+    fullName: "Ben Carter",
+    nickname: null,
+    photoDataUrl: null,
+    voiceProfile: null,
+    color: "#d96c4a",
+    createdAt: "2026-08-31T00:00:00Z",
+  };
+
+  function enrollmentSnapshot(profile: Person["voiceProfile"]): WorkspaceSnapshot {
+    return structuredClone({
+      ...snapshot,
+      people: [{ ...person, voiceProfile: profile }],
+      settings: { ...snapshot.settings, pyannoteApiKeyConfigured: true },
+    });
+  }
+
+  beforeEach(() => {
+    service.loadWorkspace.mockReset();
+    service.loadMeetingSegments.mockReset().mockResolvedValue([selectedSegment]);
+    service.assignSpeaker.mockReset().mockResolvedValue(undefined);
+    service.findVoiceEnrollmentSegment.mockReset().mockResolvedValue({
+      ...selectedSegment,
+      personId: person.id,
+      identitySource: "manual",
+    });
+    service.enrollVoiceProfile.mockReset().mockResolvedValue({
+      ...person,
+      voiceProfile: {
+        status: "ready",
+        enrollmentDurationMs: 12_000,
+        enrollmentClipCount: 2,
+        source: "microphone",
+        updatedAt: "2026-08-31T00:00:00Z",
+        lastError: null,
+      },
+    });
+  });
+
+  it("labels a speaker manually and enrolls from the best assigned segment", async () => {
+    service.loadWorkspace.mockResolvedValue(enrollmentSnapshot(null));
+    await useWorkspace.getState().load();
+
+    await expect(
+      useWorkspace.getState().assignSpeaker(firstMeeting.id, "A", person.id),
+    ).resolves.toBe(true);
+
+    const assigned = useWorkspace.getState().segments.find((segment) => segment.speakerLabel === "A");
+    expect(assigned?.identitySource).toBe("manual");
+    await vi.waitFor(() => {
+      expect(service.enrollVoiceProfile).toHaveBeenCalledWith(
+        selectedSegment.meetingId,
+        selectedSegment.speakerLabel,
+        person.id,
+      );
+    });
+  });
+
+  it("does not re-enroll a ready profile", async () => {
+    service.loadWorkspace.mockResolvedValue(enrollmentSnapshot({
+      status: "ready",
+      enrollmentDurationMs: 12_000,
+      enrollmentClipCount: 2,
+      source: "microphone",
+      updatedAt: "2026-08-31T00:00:00Z",
+      lastError: null,
+    }));
+    await useWorkspace.getState().load();
+
+    await useWorkspace.getState().assignSpeaker(firstMeeting.id, "A", person.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(service.enrollVoiceProfile).not.toHaveBeenCalled();
+  });
+
+  it("never enrolls a person whose automatic labeling is turned off", async () => {
+    service.loadWorkspace.mockResolvedValue(enrollmentSnapshot({
+      status: "disabled",
+      enrollmentDurationMs: null,
+      enrollmentClipCount: null,
+      source: null,
+      updatedAt: "2026-08-31T00:00:00Z",
+      lastError: null,
+    }));
+    await useWorkspace.getState().load();
+
+    await useWorkspace.getState().assignSpeaker(firstMeeting.id, "A", person.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(service.enrollVoiceProfile).not.toHaveBeenCalled();
   });
 });

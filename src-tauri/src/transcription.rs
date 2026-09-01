@@ -105,14 +105,18 @@ pub async fn transcribe_meeting(
 
     let people = database.people()?;
     let settings = database.settings()?;
-    let candidate_ids = identification_candidate_ids(database, &meeting, &settings)?;
+    // Likely-present people (this meeting/project + the microphone owner) get
+    // identification slots first; everyone else with a learned voiceprint fills
+    // the remaining slots, most recently matched first.
+    let priority_ids = priority_candidate_ids(database, &meeting, &settings)?;
+    let (priority_profiles, general_profiles): (Vec<_>, Vec<_>) = database
+        .voice_profiles()?
+        .into_iter()
+        .filter(|profile| profile.status == "ready")
+        .partition(|profile| priority_ids.contains(&profile.person_id));
     let mut known_people = Vec::new();
     let mut profile_storage_warnings = Vec::new();
-    for profile in database.voice_profiles()?.into_iter().filter(|profile| {
-        candidate_ids.contains(&profile.person_id)
-            && profile.status == "ready"
-            && profile.consent_confirmed_at.is_some()
-    }) {
+    for profile in priority_profiles.into_iter().chain(general_profiles) {
         if known_people.len() >= 50 {
             break;
         }
@@ -337,16 +341,11 @@ struct AcceptedIdentity {
     confidence: f64,
 }
 
-fn identification_candidate_ids(
+fn priority_candidate_ids(
     database: &Database,
     meeting: &Meeting,
     settings: &AppSettings,
 ) -> AppResult<HashSet<String>> {
-    if !settings.speaker_identification_enabled || settings.biometric_consent_accepted_at.is_none()
-    {
-        return Ok(HashSet::new());
-    }
-
     let mut candidates = HashSet::new();
     if let Some(person_id) = settings.local_speaker_person_id.as_ref() {
         candidates.insert(person_id.clone());
@@ -516,8 +515,6 @@ fn local_microphone_person(
     end_ms: i64,
 ) -> Option<String> {
     if !settings.prefer_local_speaker_for_microphone
-        || !settings.speaker_identification_enabled
-        || settings.biometric_consent_accepted_at.is_none()
         || !active_sources.iter().any(|source| source == "microphone")
     {
         return None;

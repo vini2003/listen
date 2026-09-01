@@ -240,7 +240,7 @@ impl Database {
             transaction.execute(
                 "INSERT OR IGNORE INTO voice_profiles(
                     person_id, provider, voiceprint, status, created_at, updated_at
-                 ) VALUES(?1, 'pyannote', ?2, 'consent_required', ?3, ?3)",
+                 ) VALUES(?1, 'pyannote', ?2, 'ready', ?3, ?3)",
                 params![person_id, voiceprint, now],
             )?;
             transaction.execute(
@@ -337,7 +337,7 @@ impl Database {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT p.id, p.full_name, p.nickname, p.photo_data_url, p.color, p.created_at,
-                    v.status, v.consent_confirmed_at, v.enrollment_duration_ms,
+                    v.status, v.enrollment_duration_ms,
                     v.enrollment_clip_count, v.source, v.updated_at, v.last_error
              FROM people p LEFT JOIN voice_profiles v ON v.person_id = p.id
              ORDER BY COALESCE(p.nickname, p.full_name) COLLATE NOCASE",
@@ -346,12 +346,11 @@ impl Database {
             let voice_profile = match row.get::<_, Option<String>>(6)? {
                 Some(status) => Some(VoiceProfileSummary {
                     status,
-                    consent_confirmed_at: row.get(7)?,
-                    enrollment_duration_ms: row.get(8)?,
-                    enrollment_clip_count: row.get(9)?,
-                    source: row.get(10)?,
-                    updated_at: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                    last_error: row.get(12)?,
+                    enrollment_duration_ms: row.get(7)?,
+                    enrollment_clip_count: row.get(8)?,
+                    source: row.get(9)?,
+                    updated_at: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                    last_error: row.get(11)?,
                 }),
                 None => None,
             };
@@ -407,7 +406,8 @@ impl Database {
                         segment.start_ms, segment.end_ms, segment.text
                  FROM transcript_segments segment
                  JOIN meetings meeting ON meeting.id = segment.meeting_id
-                 WHERE segment.person_id = ?1 AND meeting.deleted_at IS NULL
+                 WHERE segment.person_id = ?1 AND segment.identity_source = 'manual'
+                   AND meeting.deleted_at IS NULL
                  ORDER BY segment.end_ms - segment.start_ms DESC, segment.start_ms
                  LIMIT 1",
                 [person_id],
@@ -434,26 +434,19 @@ impl Database {
     }
 
     pub fn update_settings(&self, settings: &AppSettings) -> AppResult<()> {
-        if settings.speaker_identification_enabled
-            && settings.biometric_consent_accepted_at.is_none()
-        {
-            return Err(AppError::Validation(
-                "Voice identification requires biometric consent".to_string(),
-            ));
-        }
+        let mut settings = settings.clone();
         if let Some(person_id) = settings.local_speaker_person_id.as_deref() {
-            let permitted: bool = self.connection()?.query_row(
-                "SELECT EXISTS(SELECT 1 FROM voice_profiles WHERE person_id = ?1 AND consent_confirmed_at IS NOT NULL)",
+            let exists: bool = self.connection()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM people WHERE id = ?1)",
                 [person_id],
                 |row| row.get(0),
             )?;
-            if !permitted {
-                return Err(AppError::Validation(
-                    "Confirm this person's voice permission before selecting them as the microphone owner".to_string(),
-                ));
+            // A stale id (person deleted elsewhere) must not block unrelated settings saves.
+            if !exists {
+                settings.local_speaker_person_id = None;
             }
         }
-        let value = serde_json::to_string(settings)
+        let value = serde_json::to_string(&settings)
             .map_err(|error| AppError::Validation(error.to_string()))?;
         self.connection()?.execute(
             "INSERT INTO settings(key, value) VALUES('app', ?1)
@@ -666,59 +659,100 @@ impl Database {
     pub fn voice_profiles(&self) -> AppResult<Vec<StoredVoiceProfile>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT person_id, voiceprint, status, consent_confirmed_at
-             FROM voice_profiles",
+            "SELECT person_id, voiceprint, status
+             FROM voice_profiles
+             ORDER BY updated_at DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(StoredVoiceProfile {
                 person_id: row.get(0)?,
                 voiceprint: row.get(1)?,
                 status: row.get(2)?,
-                consent_confirmed_at: row.get(3)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
-    pub fn set_person_voice_consent(&self, person_id: &str, confirmed: bool) -> AppResult<()> {
-        let connection = self.connection()?;
-        if confirmed {
-            let now = Utc::now().to_rfc3339();
-            connection.execute(
-                "INSERT INTO voice_profiles(
-                    person_id, provider, status, consent_confirmed_at, created_at, updated_at
-                 ) VALUES(?1, 'pyannote', 'pending_sample', ?2, ?2, ?2)
-                 ON CONFLICT(person_id) DO UPDATE SET
-                    status = CASE WHEN voice_profiles.voiceprint IS NULL
-                                  THEN 'pending_sample' ELSE 'ready' END,
-                    consent_confirmed_at = excluded.consent_confirmed_at,
-                    last_error = NULL,
-                    updated_at = excluded.updated_at",
+    /// Creates a pending profile row when the person has none. Never resurrects
+    /// a row a user disabled.
+    pub fn ensure_voice_profile(&self, person_id: &str) -> AppResult<()> {
+        let now = Utc::now().to_rfc3339();
+        self.connection()?
+            .execute(
+                "INSERT INTO voice_profiles(person_id, provider, status, created_at, updated_at)
+                 VALUES(?1, 'pyannote', 'pending_sample', ?2, ?2)
+                 ON CONFLICT(person_id) DO NOTHING",
                 params![person_id, now],
-            )?;
-        } else {
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::SqliteFailure(inner, _)
+                    if inner.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    AppError::NotFound("Person")
+                }
+                other => AppError::from(other),
+            })?;
+        Ok(())
+    }
+
+    /// Durable erase: keeps a tombstone row so labeling this person again does
+    /// not silently relearn a voiceprint.
+    pub fn disable_voice_profile(&self, person_id: &str) -> AppResult<()> {
+        let connection = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+        connection.execute(
+            "INSERT INTO voice_profiles(person_id, provider, status, created_at, updated_at)
+             VALUES(?1, 'pyannote', 'disabled', ?2, ?2)
+             ON CONFLICT(person_id) DO UPDATE SET
+                status = 'disabled', voiceprint = NULL, enrollment_meeting_id = NULL,
+                enrollment_speaker_label = NULL, enrollment_duration_ms = NULL,
+                enrollment_clip_count = NULL, source = NULL, last_error = NULL,
+                updated_at = excluded.updated_at",
+            params![person_id, now],
+        )?;
+        connection.execute(
+            "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
+            [person_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn enable_voice_profile(&self, person_id: &str) -> AppResult<()> {
+        self.ensure_voice_profile(person_id)?;
+        self.connection()?.execute(
+            "UPDATE voice_profiles SET status = 'pending_sample', last_error = NULL, updated_at = ?1
+             WHERE person_id = ?2 AND status = 'disabled'",
+            params![Utc::now().to_rfc3339(), person_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn touch_voice_profiles(&self, person_ids: &[String]) -> AppResult<()> {
+        if person_ids.is_empty() {
+            return Ok(());
+        }
+        let connection = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+        for person_id in person_ids {
             connection.execute(
-                "DELETE FROM voice_profiles WHERE person_id = ?1",
-                [person_id],
-            )?;
-            connection.execute(
-                "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
-                [person_id],
+                "UPDATE voice_profiles SET updated_at = ?1 WHERE person_id = ?2",
+                params![now, person_id],
             )?;
         }
         Ok(())
     }
 
     pub fn mark_voice_profile_learning(&self, person_id: &str) -> AppResult<()> {
+        self.ensure_voice_profile(person_id)?;
         let now = Utc::now().to_rfc3339();
         if self.connection()?.execute(
             "UPDATE voice_profiles SET status = 'learning', last_error = NULL, updated_at = ?1
-             WHERE person_id = ?2 AND consent_confirmed_at IS NOT NULL",
+             WHERE person_id = ?2 AND status != 'disabled'",
             params![now, person_id],
         )? != 1
         {
             return Err(AppError::Validation(
-                "Confirm permission before creating this voice profile".to_string(),
+                "Automatic voice labeling is turned off for this person".to_string(),
             ));
         }
         Ok(())
@@ -739,7 +773,7 @@ impl Database {
                 voiceprint = NULL, status = 'ready', enrollment_meeting_id = ?1,
                 enrollment_speaker_label = ?2, enrollment_duration_ms = ?3,
                 enrollment_clip_count = ?4, source = ?5, last_error = NULL, updated_at = ?6
-             WHERE person_id = ?7 AND consent_confirmed_at IS NOT NULL",
+             WHERE person_id = ?7 AND status != 'disabled'",
             params![
                 meeting_id,
                 speaker_label,
@@ -752,7 +786,7 @@ impl Database {
         )? != 1
         {
             return Err(AppError::Validation(
-                "Voice profile permission was withdrawn during enrollment".to_string(),
+                "The voice profile was removed during enrollment".to_string(),
             ));
         }
         Ok(())
@@ -769,7 +803,7 @@ impl Database {
     pub fn activate_existing_voice_profile(&self, person_id: &str) -> AppResult<()> {
         self.connection()?.execute(
             "UPDATE voice_profiles SET status = 'ready', last_error = NULL, updated_at = ?1
-             WHERE person_id = ?2 AND consent_confirmed_at IS NOT NULL",
+             WHERE person_id = ?2 AND status != 'disabled'",
             params![Utc::now().to_rfc3339(), person_id],
         )?;
         Ok(())
@@ -791,7 +825,7 @@ impl Database {
     pub fn mark_voice_profile_pending(&self, person_id: &str, detail: &str) -> AppResult<()> {
         self.connection()?.execute(
             "UPDATE voice_profiles SET status = 'pending_sample', last_error = ?1, updated_at = ?2
-             WHERE person_id = ?3 AND consent_confirmed_at IS NOT NULL",
+             WHERE person_id = ?3 AND status != 'disabled'",
             params![detail, Utc::now().to_rfc3339(), person_id],
         )?;
         Ok(())
@@ -800,18 +834,9 @@ impl Database {
     pub fn mark_voice_profile_failed(&self, person_id: &str, detail: &str) -> AppResult<()> {
         self.connection()?.execute(
             "UPDATE voice_profiles SET status = 'failed', last_error = ?1, updated_at = ?2
-             WHERE person_id = ?3 AND consent_confirmed_at IS NOT NULL",
+             WHERE person_id = ?3 AND status != 'disabled'",
             params![detail, Utc::now().to_rfc3339(), person_id],
         )?;
-        Ok(())
-    }
-
-    pub fn delete_all_voice_profiles(&self) -> AppResult<()> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        transaction.execute("DELETE FROM voice_profiles", [])?;
-        transaction.execute("UPDATE people SET reference_audio_data_url = NULL", [])?;
-        transaction.commit()?;
         Ok(())
     }
 
@@ -1639,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_profile_requires_permission_and_can_be_deleted() {
+    fn voice_profile_lifecycle_without_consent() {
         let (_directory, database) = database();
         let vinicius = database
             .create_person(PersonDraft {
@@ -1649,9 +1674,10 @@ mod tests {
             })
             .expect("Vinicius");
 
+        // A freshly-created person has no profile row; learning creates one.
         database
-            .set_person_voice_consent(&vinicius.id, true)
-            .expect("confirm permission");
+            .mark_voice_profile_learning(&vinicius.id)
+            .expect("learning starts without any prior row");
         database
             .mark_voice_profile_failed(
                 &vinicius.id,
@@ -1684,12 +1710,105 @@ mod tests {
         let profile = people[0].voice_profile.as_ref().expect("voice profile");
         assert_eq!(profile.status, "ready");
         assert_eq!(profile.enrollment_duration_ms, Some(18_000));
+
+        // Durable erase: the tombstone survives and blocks relearning...
         database
-            .set_person_voice_consent(&vinicius.id, false)
-            .expect("withdraw permission");
-        assert!(database.people().expect("people")[0]
-            .voice_profile
-            .is_none());
+            .disable_voice_profile(&vinicius.id)
+            .expect("disable voice profile");
+        assert_eq!(
+            database.people().expect("people")[0]
+                .voice_profile
+                .as_ref()
+                .expect("tombstone row")
+                .status,
+            "disabled"
+        );
+        assert!(database.mark_voice_profile_learning(&vinicius.id).is_err());
+        database
+            .ensure_voice_profile(&vinicius.id)
+            .expect("ensure is a no-op on a tombstone");
+        assert_eq!(
+            database.people().expect("people")[0]
+                .voice_profile
+                .as_ref()
+                .expect("tombstone row")
+                .status,
+            "disabled"
+        );
+
+        // ...until the user re-enables automatic labeling.
+        database
+            .enable_voice_profile(&vinicius.id)
+            .expect("re-enable");
+        assert_eq!(
+            database.people().expect("people")[0]
+                .voice_profile
+                .as_ref()
+                .expect("voice profile")
+                .status,
+            "pending_sample"
+        );
+    }
+
+    #[test]
+    fn legacy_voiceprint_rows_migrate_as_ready() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = Database::open(directory.path().to_path_buf()).expect("database");
+        let person = database
+            .create_person(PersonDraft {
+                full_name: "Legacy".to_string(),
+                nickname: None,
+                photo_data_url: None,
+            })
+            .expect("person");
+        database
+            .connection()
+            .expect("connection")
+            .execute(
+                "UPDATE people SET reference_audio_data_url = 'pyannote:print' WHERE id = ?1",
+                [&person.id],
+            )
+            .expect("seed legacy voiceprint");
+
+        drop(database);
+        let database = Database::open(directory.path().to_path_buf()).expect("reopen");
+        let people = database.people().expect("people");
+        assert_eq!(
+            people[0].voice_profile.as_ref().expect("profile").status,
+            "ready"
+        );
+    }
+
+    #[test]
+    fn stale_local_speaker_is_cleared_on_settings_save() {
+        let (_directory, database) = database();
+        let mut settings = AppSettings::default();
+        settings.local_speaker_person_id = Some("no-such-person".to_string());
+        database.update_settings(&settings).expect("settings save");
+        assert_eq!(
+            database
+                .settings()
+                .expect("settings")
+                .local_speaker_person_id,
+            None
+        );
+
+        let person = database
+            .create_person(PersonDraft {
+                full_name: "Owner".to_string(),
+                nickname: None,
+                photo_data_url: None,
+            })
+            .expect("person");
+        settings.local_speaker_person_id = Some(person.id.clone());
+        database.update_settings(&settings).expect("settings save");
+        assert_eq!(
+            database
+                .settings()
+                .expect("settings")
+                .local_speaker_person_id,
+            Some(person.id)
+        );
     }
 
     #[test]

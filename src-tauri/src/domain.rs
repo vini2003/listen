@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-pub const PRIVACY_NOTICE_VERSION: &str = "2026-08-14";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -64,7 +62,6 @@ pub struct PersonDraft {
 #[serde(rename_all = "camelCase")]
 pub struct VoiceProfileSummary {
     pub status: String,
-    pub consent_confirmed_at: Option<String>,
     pub enrollment_duration_ms: Option<i64>,
     pub enrollment_clip_count: Option<i64>,
     pub source: Option<String>,
@@ -77,7 +74,6 @@ pub struct StoredVoiceProfile {
     pub person_id: String,
     pub voiceprint: Option<String>,
     pub status: String,
-    pub consent_confirmed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,12 +150,6 @@ pub struct AppSettings {
     #[serde(default)]
     pub pyannote_api_key_configured: bool,
     #[serde(default)]
-    pub privacy_notice_version: Option<String>,
-    #[serde(default)]
-    pub biometric_consent_accepted_at: Option<String>,
-    #[serde(default)]
-    pub speaker_identification_enabled: bool,
-    #[serde(default)]
     pub local_speaker_person_id: Option<String>,
     #[serde(default)]
     pub prefer_local_speaker_for_microphone: bool,
@@ -175,9 +165,6 @@ impl Default for AppSettings {
             theme: "system".to_string(),
             api_key_configured: false,
             pyannote_api_key_configured: false,
-            privacy_notice_version: None,
-            biometric_consent_accepted_at: None,
-            speaker_identification_enabled: false,
             local_speaker_person_id: None,
             prefer_local_speaker_for_microphone: true,
         }

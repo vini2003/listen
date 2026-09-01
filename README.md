@@ -67,4 +67,6 @@ cargo test
 
 The database, conversation history, and audio chunks are stored in the operating system's application-data directory. Audio remains local until the user explicitly requests transcription, when a normalized copy is uploaded to pyannoteAI's temporary media storage. Transcript context is sent to OpenAI only when the user asks a meeting or project question, with remote response storage disabled. API keys are stored in Windows Credential Manager, macOS Keychain, or the platform keyring rather than SQLite or frontend storage.
 
+Whenever a pyannote key is configured, labeling a speaker as a person automatically learns an encrypted, locally stored voice profile so that person is named automatically in future recordings. Automatic labeling can be turned off per person in People, and every stored profile can be erased at once in Settings.
+
 Meeting participants should be informed and consent to recording where required by local law and organizational policy.

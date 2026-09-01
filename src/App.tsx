@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { CreateMeetingDialog, CreateProjectDialog } from "./components/dialogs/CreateDialogs";
 import { PeopleDialog } from "./components/dialogs/PeopleDialog";
-import { PrivacyNoticeDialog } from "./components/dialogs/PrivacyNoticeDialog";
 import { SettingsDialog, type SettingsSection } from "./components/dialogs/SettingsDialog";
 import { EmptyState } from "./components/EmptyState";
 import { MeetingView } from "./components/meeting/MeetingView";
@@ -18,7 +17,6 @@ import {
   listenForBrowserReference,
   type AssistantReference,
 } from "./services/assistantWindow";
-import { PRIVACY_NOTICE_VERSION } from "./domain/privacy";
 import { useWorkspace } from "./store/workspace";
 
 export default function App() {
@@ -164,7 +162,6 @@ export default function App() {
       <CreateMeetingDialog open={createMeetingOpen} initialProjectId={newMeetingProjectId} onClose={() => setCreateMeetingOpen(false)} />
       <PeopleDialog open={peopleOpen} onClose={() => setPeopleOpen(false)} />
       <SettingsDialog open={settingsOpen !== null} initialSection={settingsOpen?.section} onClose={() => setSettingsOpen(null)} />
-      <PrivacyNoticeDialog open={workspace.settings.privacyNoticeVersion !== PRIVACY_NOTICE_VERSION} />
     </div>
   );
 }

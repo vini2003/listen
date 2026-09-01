@@ -17,13 +17,12 @@ mod voice_reference;
 use std::path::{Path, PathBuf};
 
 use audio::RecordingManager;
-use chrono::Utc;
 use database::Database;
 use diagnostics::Diagnostics;
 use domain::{
     AppSettings, AssistantContext, ChatMessage, Meeting, MeetingDraft, MeetingPlacement, Person,
     PersonDraft, Project, ProjectDraft, RecordingLevels, RecordingRequest, TranscriptSegmentBackup,
-    WorkspaceSnapshot, PRIVACY_NOTICE_VERSION,
+    WorkspaceSnapshot,
 };
 use error::{AppError, AppResult};
 use parking_lot::Mutex;
@@ -365,71 +364,10 @@ fn restore_transcript_segments(
 }
 
 #[tauri::command]
-fn acknowledge_privacy_notice(
-    state: State<'_, AppState>,
-    enable_voice_identification: bool,
-) -> AppResult<AppSettings> {
-    let mut settings = state.database.settings()?;
-    settings.privacy_notice_version = Some(PRIVACY_NOTICE_VERSION.to_string());
-    settings.speaker_identification_enabled = enable_voice_identification;
-    settings.biometric_consent_accepted_at =
-        enable_voice_identification.then(|| Utc::now().to_rfc3339());
-    state.database.update_settings(&settings)?;
-    Ok(settings)
-}
-
-#[tauri::command]
-fn set_person_voice_consent(
-    state: State<'_, AppState>,
-    person_id: String,
-    confirmed: bool,
-) -> AppResult<Person> {
-    if confirmed {
-        let settings = state.database.settings()?;
-        if !settings.speaker_identification_enabled
-            || settings.biometric_consent_accepted_at.is_none()
-        {
-            return Err(AppError::Validation(
-                "Enable voice identification in Settings first".to_string(),
-            ));
-        }
-    }
-    let stored_voiceprint_exists = confirmed && state.voice_profiles.load(&person_id)?.is_some();
-    let legacy_voiceprint = if confirmed {
-        state
-            .database
-            .voice_profiles()?
-            .into_iter()
-            .find(|profile| profile.person_id == person_id)
-            .and_then(|profile| profile.voiceprint)
-            .or(credentials::legacy_voiceprint(&person_id)?)
-    } else {
-        None
-    };
-    if !confirmed {
-        state.voice_profiles.delete(&person_id)?;
-        credentials::delete_legacy_voiceprint(&person_id)?;
-    }
-    state
-        .database
-        .set_person_voice_consent(&person_id, confirmed)?;
-    if confirmed {
-        if let Some(voiceprint) = legacy_voiceprint {
-            state.voice_profiles.store(&person_id, &voiceprint)?;
-            state.database.clear_voiceprint_blob(&person_id)?;
-            credentials::delete_legacy_voiceprint(&person_id)?;
-            state.database.activate_existing_voice_profile(&person_id)?;
-        } else if stored_voiceprint_exists {
-            state.database.activate_existing_voice_profile(&person_id)?;
-        }
-    }
-    if !confirmed {
-        let mut settings = state.database.settings()?;
-        if settings.local_speaker_person_id.as_deref() == Some(person_id.as_str()) {
-            settings.local_speaker_person_id = None;
-            state.database.update_settings(&settings)?;
-        }
-    }
+fn forget_voice_profile(state: State<'_, AppState>, person_id: String) -> AppResult<Person> {
+    state.voice_profiles.delete(&person_id)?;
+    credentials::delete_legacy_voiceprint(&person_id)?;
+    state.database.disable_voice_profile(&person_id)?;
     state
         .database
         .people()?
@@ -439,18 +377,24 @@ fn set_person_voice_consent(
 }
 
 #[tauri::command]
-fn withdraw_biometric_consent(state: State<'_, AppState>) -> AppResult<AppSettings> {
+fn forget_all_voice_profiles(state: State<'_, AppState>) -> AppResult<()> {
     for profile in state.database.voice_profiles()? {
         state.voice_profiles.delete(&profile.person_id)?;
         credentials::delete_legacy_voiceprint(&profile.person_id)?;
+        state.database.disable_voice_profile(&profile.person_id)?;
     }
-    state.database.delete_all_voice_profiles()?;
-    let mut settings = state.database.settings()?;
-    settings.speaker_identification_enabled = false;
-    settings.biometric_consent_accepted_at = None;
-    settings.local_speaker_person_id = None;
-    state.database.update_settings(&settings)?;
-    Ok(settings)
+    Ok(())
+}
+
+#[tauri::command]
+fn enable_voice_profile(state: State<'_, AppState>, person_id: String) -> AppResult<Person> {
+    state.database.enable_voice_profile(&person_id)?;
+    state
+        .database
+        .people()?
+        .into_iter()
+        .find(|person| person.id == person_id)
+        .ok_or(AppError::NotFound("Person"))
 }
 
 #[tauri::command]
@@ -460,13 +404,6 @@ async fn enroll_voice_profile(
     speaker_label: String,
     person_id: String,
 ) -> AppResult<Person> {
-    let settings = state.database.settings()?;
-    if !settings.speaker_identification_enabled || settings.biometric_consent_accepted_at.is_none()
-    {
-        return Err(AppError::Validation(
-            "Voice identification is disabled".to_string(),
-        ));
-    }
     state.database.mark_voice_profile_learning(&person_id)?;
     let result = async {
         let api_key = credentials::pyannote_key()?;
@@ -769,6 +706,17 @@ async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Me
             report.identity_candidates,
         );
     }
+    // Keeps recently-matched voiceprints ahead of the 50-profile identification cap.
+    let matched_people: Vec<String> = report
+        .identity_decisions
+        .iter()
+        .filter_map(|decision| decision.person_id.clone())
+        .collect();
+    if let Err(error) = state.database.touch_voice_profiles(&matched_people) {
+        state
+            .diagnostics
+            .record_pipeline_warning(meeting_id, "identification", &error.to_string());
+    }
     state.diagnostics.record_transcription_completed(
         meeting_id,
         &report.active_sources,
@@ -826,6 +774,27 @@ pub fn run() {
                     }
                 }
             }
+            // Consent was removed in 0.3: promote profiles that were parked
+            // behind the old per-person permission gate.
+            for profile in database.voice_profiles().unwrap_or_default() {
+                if profile.status != "consent_required" {
+                    continue;
+                }
+                let has_print = profile.voiceprint.is_some()
+                    || voice_profiles
+                        .load(&profile.person_id)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if has_print {
+                    let _ = database.activate_existing_voice_profile(&profile.person_id);
+                } else {
+                    let _ = database.mark_voice_profile_pending(
+                        &profile.person_id,
+                        "The voice profile will be learned from the next labeled recording",
+                    );
+                }
+            }
             app.manage(AppState {
                 database,
                 recordings_directory: app_data_dir.join("recordings"),
@@ -878,9 +847,9 @@ pub fn run() {
             assign_speaker,
             delete_transcript_segments,
             restore_transcript_segments,
-            acknowledge_privacy_notice,
-            set_person_voice_consent,
-            withdraw_biometric_consent,
+            forget_voice_profile,
+            forget_all_voice_profiles,
+            enable_voice_profile,
             enroll_voice_profile,
             update_settings,
             set_api_key,

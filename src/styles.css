@@ -210,6 +210,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .timestamp-button .timestamp-glyph { display: grid; place-items: center; width: 10px; color: var(--text-faint); opacity: 0; transition: opacity 110ms ease; }
 .timestamp-button:hover .timestamp-glyph, .timestamp-button:focus-visible .timestamp-glyph, .timestamp-button.is-playing .timestamp-glyph, .timestamp-button.is-loading .timestamp-glyph { opacity: 1; }
 .timestamp-button.is-playing .timestamp-label, .timestamp-button.is-playing .timestamp-glyph { color: var(--recording); }
+.identity-auto-badge { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--text-faint); }
+.transcript-row:hover .identity-auto-badge { color: var(--text-soft); }
 .segment-playback-spinner { animation: softSpin 800ms linear infinite; }
 .transcript-copy p { max-width: 700px; margin: 1px 0 0; color: var(--text); font-size: 14px; line-height: 1.43; }
 .transcript-message-actions { right: 2px; bottom: -16px; }
@@ -484,8 +486,7 @@ input:checked + .switch::after { transform: translateX(12px); }
 .settings-toggle { display: flex; align-items: flex-start; gap: 8px; color: var(--text-soft); font-size: 11.5px; line-height: 1.4; cursor: pointer; }
 .settings-toggle input { flex: 0 0 auto; width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--accent); }
 .settings-toggle > span { display: flex; align-items: center; gap: 6px; }
-.voice-permission-toggle { padding-top: 10px; border-top: 1px solid var(--border); }
-.voice-profile-disabled { margin: 0; color: var(--text-faint); font-size: 11px; }
+.voice-labeling-toggle { padding-top: 10px; border-top: 1px solid var(--border); }
 .danger-text-button { display: flex; align-items: center; gap: 6px; padding: 7px; color: var(--danger); background: transparent; border-radius: 6px; font-size: 10px; }
 .danger-text-button:hover { background: var(--danger-soft); }
 .person-editor-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 35px; color: var(--text-faint); text-align: center; }
@@ -518,16 +519,6 @@ input:checked + .switch::after { transform: translateX(12px); }
 .voice-settings-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 15px; }
 .voice-owner-hint { margin: 0; color: var(--text-soft); font-size: 11.5px; line-height: 1.45; }
 
-.privacy-notice { padding: 19px 22px 22px; }
-.privacy-point { display: grid; grid-template-columns: 30px 1fr; gap: 10px; padding: 10px 0; }
-.privacy-point > svg { margin: 2px 0 0 5px; color: var(--text-soft); }
-.privacy-point strong, .privacy-choice strong { display: block; font-size: 13px; font-weight: 650; }
-.privacy-point p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
-.privacy-choice { display: grid; grid-template-columns: 28px 1fr; align-items: start; gap: 9px; margin-top: 9px; padding: 14px; background: var(--selected); border: 1px solid var(--border); border-radius: 11px; }
-.privacy-choice > svg { margin-top: 1px; color: var(--text-soft); }
-.privacy-choice small { display: block; margin-top: 4px; color: var(--text-soft); font-size: 11.5px; line-height: 1.45; }
-.privacy-fine-print { margin: 13px 2px 0; color: var(--text-faint); font-size: 10.5px; line-height: 1.5; }
-.privacy-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 .toast-viewport { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; position: fixed; z-index: var(--z-toast); right: 18px; bottom: 18px; width: min(390px, calc(100vw - 36px)); pointer-events: none; }
 .error-toast { display: flex; align-items: center; gap: 9px; width: fit-content; max-width: 100%; padding: 11px 11px 11px 13px; color: var(--text-soft); background: color-mix(in srgb, var(--surface-raised) 96%, transparent); border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); border-radius: 11px; box-shadow: var(--shadow-lg); font-size: 12px; line-height: 1.4; pointer-events: auto; backdrop-filter: blur(18px); }

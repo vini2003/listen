@@ -25,8 +25,8 @@ The codebase is separated by responsibility rather than framework convenience:
 3. Every selected source writes independently to bounded PCM WAV segments.
 4. Stopping capture drops every native stream and finalizes each WAV header before the meeting becomes ready.
 5. Transcription streams a normalized 16 kHz mono render to temporary pyannote media storage and runs Precision-2 with speaker-attributed STT.
-6. When voiceprints exist, identification runs in parallel. Identities are joined to transcript turns by timestamp overlap, never by a job-local `SPEAKER_XX` label.
-7. Manual speaker assignment updates every matching turn immediately. A background task selects an isolated, non-overlapping microphone or speaker passage and learns one voiceprint for future meetings.
+6. When voiceprints exist, identification runs in parallel. Candidates are every person with a learned profile — people from the current meeting and project fill the capped voiceprint slots first, then everyone else by recency. Identities are joined to transcript turns by timestamp overlap, never by a job-local `SPEAKER_XX` label.
+7. Manual speaker assignment updates every matching turn immediately. A background task selects an isolated, non-overlapping, manually-labeled microphone or speaker passage and learns one voiceprint for future meetings — unless automatic labeling was turned off for that person.
 8. The raw segment text is retained in SQLite while bounded Luna requests conservatively correct likely ASR mistakes and punctuation. Invalid or unavailable cleanup results are discarded without failing the recording.
 
 Keeping microphone and speaker audio as separate tracks avoids realtime resampling and clock-drift corruption. It also prevents a voiceprint from being learned from a mixed passage containing both the local and remote speaker.

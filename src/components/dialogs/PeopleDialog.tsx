@@ -1,4 +1,4 @@
-import { Fingerprint, ImageUp, Mic2, Pencil, Plus, Save, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import { Fingerprint, ImageUp, Mic2, Pencil, Plus, Save, Sparkles, Trash2, UserRound } from "lucide-react";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import type { Person, PersonDraft } from "../../domain/models";
 import { useWorkspace } from "../../store/workspace";
@@ -17,7 +17,7 @@ const emptyDraft: PersonDraft = {
 };
 
 export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
-  const { people, settings, createPerson, updatePerson, deletePerson, setPersonVoiceConsent, updateSettings, busy } = useWorkspace();
+  const { people, settings, createPerson, updatePerson, deletePerson, eraseVoiceProfile, enableVoiceLabeling, updateSettings, busy } = useWorkspace();
   const [editing, setEditing] = useState<Person | "new" | null>(null);
   const [draft, setDraft] = useState<PersonDraft>(emptyDraft);
 
@@ -103,12 +103,8 @@ export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
               {editing !== "new" ? (
                 <div className="voice-profile-card">
                   <div className="voice-profile-heading"><span><Fingerprint size={17} /></span><div><strong>Voice identification</strong><p>{voiceProfileDescription(editing)}</p></div><span className={`voice-profile-status status-${editing.voiceProfile?.status ?? "off"}`}>{voiceProfileLabel(editing)}</span></div>
-                  {settings.speakerIdentificationEnabled ? (
-                    <>
-                      <label className="settings-toggle voice-permission-toggle"><input type="checkbox" checked={Boolean(editing.voiceProfile?.consentConfirmedAt)} onChange={(event) => void setPersonVoiceConsent(editing.id, event.target.checked)} /><span><ShieldCheck size={14} /> This person has agreed to voice identification</span></label>
-                      <label className="settings-toggle"><input type="checkbox" disabled={!editing.voiceProfile?.consentConfirmedAt} checked={settings.localSpeakerPersonId === editing.id} onChange={(event) => void updateSettings({ ...settings, localSpeakerPersonId: event.target.checked ? editing.id : null, preferLocalSpeakerForMicrophone: true })} /><span><Mic2 size={14} /> This is me on the selected microphone</span></label>
-                    </>
-                  ) : <p className="voice-profile-disabled">Voice identification is off. You can enable it in Settings.</p>}
+                  <label className="settings-toggle voice-labeling-toggle"><input type="checkbox" checked={editing.voiceProfile?.status !== "disabled"} onChange={(event) => void (event.target.checked ? enableVoiceLabeling(editing.id) : eraseVoiceProfile(editing.id))} /><span><Sparkles size={14} /> Label this person automatically</span></label>
+                  <label className="settings-toggle"><input type="checkbox" checked={settings.localSpeakerPersonId === editing.id} onChange={(event) => void updateSettings({ ...settings, localSpeakerPersonId: event.target.checked ? editing.id : null, preferLocalSpeakerForMicrophone: true })} /><span><Mic2 size={14} /> This is me on the selected microphone</span></label>
                 </div>
               ) : null}
               <div className="person-form-actions">
@@ -131,8 +127,8 @@ function voiceProfileLabel(person: Person): string {
     case "learning": return "Learning";
     case "pending_sample": return "Needs sample";
     case "failed": return "Needs attention";
-    case "consent_required": return "Permission needed";
-    default: return "Off";
+    case "disabled": return "Off";
+    default: return "Waiting";
   }
 }
 
@@ -145,8 +141,8 @@ function voiceProfileDescription(person: Person): string {
   if (profile?.status === "learning") return "Creating a private profile from assigned speech.";
   if (profile?.status === "pending_sample") return "Assign this person to enough clean speech to learn their voice.";
   if (profile?.status === "failed") return profile.lastError || "The last enrollment could not be completed.";
-  if (profile?.status === "consent_required") return "A legacy profile is paused until permission is confirmed.";
-  return "No biometric voice profile is stored.";
+  if (profile?.status === "disabled") return "The stored voice profile was erased and no new one will be learned.";
+  return "Learned automatically the first time you label this person in a transcript.";
 }
 
 async function fileToAvatarDataUrl(file: File): Promise<string> {

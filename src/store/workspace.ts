@@ -56,9 +56,9 @@ interface WorkspaceState extends WorkspaceSnapshot {
   deletePerson: (id: string) => Promise<boolean>;
   assignSpeaker: (meetingId: string, speakerLabel: string, personId: string | null) => Promise<boolean>;
   deleteTranscriptSegments: (ids: string[]) => Promise<boolean>;
-  acknowledgePrivacyNotice: (enableVoiceIdentification: boolean) => Promise<boolean>;
-  setPersonVoiceConsent: (personId: string, confirmed: boolean) => Promise<boolean>;
-  withdrawBiometricConsent: () => Promise<boolean>;
+  eraseVoiceProfile: (personId: string) => Promise<boolean>;
+  eraseAllVoiceProfiles: () => Promise<boolean>;
+  enableVoiceLabeling: (personId: string) => Promise<boolean>;
   updateSettings: (settings: AppSettings) => Promise<boolean>;
   setApiKey: (apiKey: string) => Promise<boolean>;
   setPyannoteApiKey: (apiKey: string) => Promise<boolean>;
@@ -91,9 +91,6 @@ const emptySnapshot: WorkspaceSnapshot = {
     theme: "system",
     apiKeyConfigured: false,
     pyannoteApiKeyConfigured: false,
-    privacyNoticeVersion: null,
-    biometricConsentAcceptedAt: null,
-    speakerIdentificationEnabled: false,
     localSpeakerPersonId: null,
     preferLocalSpeakerForMicrophone: true,
   },
@@ -188,11 +185,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   async function enrollFromAssignment(meetingId: string, speakerLabel: string, personId: string): Promise<void> {
     const state = get();
     const person = state.people.find((candidate) => candidate.id === personId);
-    if (!state.settings.speakerIdentificationEnabled
+    if (!person
       || !state.settings.pyannoteApiKeyConfigured
-      || !person?.voiceProfile?.consentConfirmedAt
-      || person.voiceProfile.status === "ready"
-      || person.voiceProfile.status === "learning"
+      || person.voiceProfile?.status === "ready"
+      || person.voiceProfile?.status === "learning"
+      || person.voiceProfile?.status === "disabled"
       || enrollmentInFlight.has(personId)) return;
     enrollmentInFlight.add(personId);
     try {
@@ -333,9 +330,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           selectedMeetingId,
           selectedProjectId: snapshot.meetings[0]?.projectId ?? null,
         });
-        if (snapshot.settings.speakerIdentificationEnabled && snapshot.settings.pyannoteApiKeyConfigured) {
+        if (snapshot.settings.pyannoteApiKeyConfigured) {
           for (const person of snapshot.people) {
-            if (person.voiceProfile?.status !== "pending_sample" || !person.voiceProfile.consentConfirmedAt) continue;
+            const status = person.voiceProfile?.status;
+            // No profile row means an upgrader whose labeled people never enrolled.
+            if (status !== undefined && status !== "pending_sample") continue;
             void enrollBestAvailableAssignment(person.id);
           }
         }
@@ -556,7 +555,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       set((state) => ({
         segments: state.segments.map((segment) =>
           segment.meetingId === meetingId && segment.speakerLabel === speakerLabel
-            ? { ...segment, personId }
+            ? { ...segment, personId, identitySource: personId ? "manual" as const : null, identityConfidence: null }
             : segment),
       }));
       try {
@@ -565,7 +564,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           undo: () => desktop.assignSpeaker(meetingId, speakerLabel, previousPersonId),
           redo: () => desktop.assignSpeaker(meetingId, speakerLabel, personId),
         });
-        if (personId) void enrollFromAssignment(meetingId, speakerLabel, personId);
+        if (personId) void enrollBestAvailableAssignment(personId);
         return true;
       } catch (error) {
         if (get().selectedMeetingId === selectedMeetingId) set({ segments: previousSegments });
@@ -597,37 +596,45 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       }
     },
 
-    async acknowledgePrivacyNotice(enableVoiceIdentification) {
+    async eraseVoiceProfile(personId) {
       const result = await run(async () => {
-        const settings = await desktop.acknowledgePrivacyNotice(enableVoiceIdentification);
-        set({ settings });
+        storePerson(await desktop.forgetVoiceProfile(personId));
         return true;
       });
       return result === true;
     },
 
-    async setPersonVoiceConsent(personId, confirmed) {
+    async eraseAllVoiceProfiles() {
       const result = await run(async () => {
-        storePerson(await desktop.setPersonVoiceConsent(personId, confirmed));
-        return true;
-      });
-      if (result !== true) return false;
-      if (confirmed) {
-        void enrollBestAvailableAssignment(personId);
-      }
-      return true;
-    },
-
-    async withdrawBiometricConsent() {
-      const result = await run(async () => {
-        const settings = await desktop.withdrawBiometricConsent();
+        await desktop.forgetAllVoiceProfiles();
         set((state) => ({
-          settings,
-          people: state.people.map((person) => ({ ...person, voiceProfile: null })),
+          people: state.people.map((person) => person.voiceProfile
+            ? {
+                ...person,
+                voiceProfile: {
+                  status: "disabled" as const,
+                  enrollmentDurationMs: null,
+                  enrollmentClipCount: null,
+                  source: null,
+                  updatedAt: new Date().toISOString(),
+                  lastError: null,
+                },
+              }
+            : person),
         }));
         return true;
       });
       return result === true;
+    },
+
+    async enableVoiceLabeling(personId) {
+      const result = await run(async () => {
+        storePerson(await desktop.enableVoiceProfile(personId));
+        return true;
+      });
+      if (result !== true) return false;
+      void enrollBestAvailableAssignment(personId);
+      return true;
     },
 
     async updateSettings(settings) {
@@ -658,9 +665,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         return true;
       });
       if (result === true && apiKey.trim()) {
+        // Serialized on purpose: each retry may decode and upload meeting audio.
         for (const person of get().people) {
-          if (!person.voiceProfile?.consentConfirmedAt || person.voiceProfile.status === "ready") continue;
-          void enrollBestAvailableAssignment(person.id);
+          const status = person.voiceProfile?.status;
+          if (status === "ready" || status === "learning" || status === "disabled") continue;
+          await enrollBestAvailableAssignment(person.id);
         }
       }
       return result === true;

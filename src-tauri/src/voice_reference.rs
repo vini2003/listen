@@ -71,6 +71,16 @@ pub async fn learn_from_assignment(
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Validation("This recording has no saved audio".to_string()))?;
     let speaker_segments = database.speaker_segments(meeting_id, speaker_label)?;
+    // Check before the paid upload/voiceprint calls; a rapid reassignment or
+    // undo should not cost an API round-trip. Re-checked after the calls too.
+    if !speaker_segments
+        .iter()
+        .any(|segment| segment.person_id.as_deref() == Some(person_id))
+    {
+        return Err(AppError::Validation(
+            "The speaker assignment changed before voice learning started".to_string(),
+        ));
+    }
     let all_segments = database.segments_for_meeting(meeting_id)?;
     let excluded_ranges = read_overlap_metadata(&directory);
     let candidate = best_reference_candidate(

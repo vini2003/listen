@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, KeyRound, LoaderCircle, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
+import { Check, ChevronDown, Copy, KeyRound, LoaderCircle, Mic2, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
@@ -316,6 +316,11 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
               </div>
             ) : null}
           </div>
+          {segment.personId && (segment.identitySource === "voiceprint" || segment.identitySource === "local_microphone") ? (
+            <span className="identity-auto-badge" title={autoIdentityTitle(segment)} aria-label={autoIdentityTitle(segment)}>
+              {segment.identitySource === "local_microphone" ? <Mic2 size={10} /> : <Sparkles size={10} />}
+            </span>
+          ) : null}
           <button
             type="button"
             className={`timestamp-button ${playingAudio ? "is-playing" : ""} ${loadingAudio ? "is-loading" : ""}`}
@@ -354,6 +359,12 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
       </div>
     </article>
   );
+}
+
+function autoIdentityTitle(segment: TranscriptSegment): string {
+  if (segment.identitySource === "local_microphone") return "Labeled automatically from your microphone";
+  const confidence = segment.identityConfidence ? ` · ${Math.round(segment.identityConfidence)}% confident` : "";
+  return `Labeled automatically by voice match${confidence}`;
 }
 
 function alphabeticLabel(index: number): string {
