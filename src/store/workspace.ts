@@ -3,6 +3,8 @@ import type {
   AppSettings,
   ChatMessage,
   ChatScope,
+  Folder,
+  FolderDraft,
   Meeting,
   MeetingDraft,
   MeetingPlacement,
@@ -12,6 +14,7 @@ import type {
   WorkspaceSnapshot,
 } from "../domain/models";
 import { friendlyError } from "../lib/errors";
+import type { MeetingDropSpot } from "../lib/meetingDrop";
 import { desktop, type RecordingRequest } from "../services/desktop";
 
 export interface AppToast {
@@ -46,10 +49,14 @@ interface WorkspaceState extends WorkspaceSnapshot {
   renameProject: (id: string, name: string) => Promise<boolean>;
   deleteProject: (id: string) => Promise<boolean>;
   reorderProjects: (ids: string[]) => Promise<boolean>;
+  createFolder: (draft: FolderDraft) => Promise<Folder | null>;
+  renameFolder: (id: string, name: string) => Promise<boolean>;
+  moveFolder: (id: string, parentId: string | null) => Promise<boolean>;
+  deleteFolder: (id: string) => Promise<boolean>;
   createMeeting: (draft: MeetingDraft) => Promise<Meeting | null>;
   renameMeeting: (id: string, title: string) => Promise<boolean>;
   moveMeeting: (id: string, projectId: string | null) => Promise<boolean>;
-  reorderMeeting: (id: string, projectId: string | null, index: number) => Promise<boolean>;
+  reorderMeeting: (id: string, target: MeetingDropSpot) => Promise<boolean>;
   deleteMeeting: (id: string) => Promise<boolean>;
   createPerson: (draft: PersonDraft) => Promise<boolean>;
   updatePerson: (id: string, draft: PersonDraft) => Promise<boolean>;
@@ -79,6 +86,7 @@ interface WorkspaceState extends WorkspaceSnapshot {
 
 const emptySnapshot: WorkspaceSnapshot = {
   projects: [],
+  folders: [],
   meetings: [],
   people: [],
   segments: [],
@@ -223,40 +231,60 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   }
 
   function currentPlacements(): MeetingPlacement[] {
-    return get().meetings.map(({ id, projectId, position }) => ({ id, projectId, position }));
+    return get().meetings.map(({ id, projectId, folderId, position }) => ({ id, projectId, folderId, position }));
   }
 
   function placementsAfterMove(
     meetingId: string,
-    projectId: string | null,
-    targetIndex: number,
+    target: MeetingDropSpot,
   ): MeetingPlacement[] {
     const meetings = [...get().meetings].sort((a, b) => a.position - b.position);
     const moving = meetings.find((meeting) => meeting.id === meetingId);
     if (!moving) return currentPlacements();
-    const sourceGroup = meetings.filter((meeting) => meeting.projectId === moving.projectId);
+    const groupKey = (projectId: string | null, folderId: string | null) =>
+      `${projectId ?? "__unsorted__"} ${folderId ?? "__root__"}`;
+    const sourceGroup = meetings.filter(
+      (meeting) => meeting.projectId === moving.projectId && meeting.folderId === moving.folderId,
+    );
     const sourceIndex = sourceGroup.findIndex((meeting) => meeting.id === meetingId);
-    const adjustedTargetIndex = moving.projectId === projectId && sourceIndex < targetIndex
-      ? targetIndex - 1
-      : targetIndex;
+    const sameGroup = moving.projectId === target.projectId && moving.folderId === target.folderId;
+    const adjustedTargetIndex = sameGroup && sourceIndex < target.index
+      ? target.index - 1
+      : target.index;
 
-    const projectKeys = new Set(meetings.map((meeting) => meeting.projectId ?? "__unsorted__"));
-    projectKeys.add(projectId ?? "__unsorted__");
+    const groups = new Map<string, { projectId: string | null; folderId: string | null }>();
+    for (const meeting of meetings) {
+      groups.set(groupKey(meeting.projectId, meeting.folderId), {
+        projectId: meeting.projectId,
+        folderId: meeting.folderId,
+      });
+    }
+    groups.set(groupKey(target.projectId, target.folderId), {
+      projectId: target.projectId,
+      folderId: target.folderId,
+    });
     const placements: MeetingPlacement[] = [];
 
-    for (const key of projectKeys) {
-      const destinationProjectId = key === "__unsorted__" ? null : key;
+    for (const destination of groups.values()) {
       const group = meetings.filter(
-        (meeting) => meeting.id !== meetingId && meeting.projectId === destinationProjectId,
+        (meeting) => meeting.id !== meetingId
+          && meeting.projectId === destination.projectId
+          && meeting.folderId === destination.folderId,
       );
-      if (destinationProjectId === projectId) {
+      if (destination.projectId === target.projectId && destination.folderId === target.folderId) {
         group.splice(Math.max(0, Math.min(adjustedTargetIndex, group.length)), 0, {
           ...moving,
-          projectId,
+          projectId: target.projectId,
+          folderId: target.folderId,
         });
       }
       group.forEach((meeting, position) => {
-        placements.push({ id: meeting.id, projectId: destinationProjectId, position });
+        placements.push({
+          id: meeting.id,
+          projectId: destination.projectId,
+          folderId: destination.folderId,
+          position,
+        });
       });
     }
 
@@ -274,7 +302,9 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       set((state) => ({
         meetings: state.meetings.map((meeting) => {
           const placement = placements.get(meeting.id);
-          return placement ? { ...meeting, projectId: placement.projectId, position: placement.position } : meeting;
+          return placement
+            ? { ...meeting, projectId: placement.projectId, folderId: placement.folderId, position: placement.position }
+            : meeting;
         }),
       }));
       return true;
@@ -407,8 +437,9 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         await desktop.deleteProject(id);
         set((state) => ({
           projects: state.projects.filter((project) => project.id !== id),
+          folders: state.folders.filter((folder) => folder.projectId !== id),
           meetings: state.meetings.map((meeting) => meeting.projectId === id
-            ? { ...meeting, projectId: null }
+            ? { ...meeting, projectId: null, folderId: null }
             : meeting),
           selectedProjectId: state.selectedProjectId === id ? null : state.selectedProjectId,
         }));
@@ -436,6 +467,72 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         redo: () => desktop.reorderProjects(ids),
       });
       return true;
+    },
+
+    async createFolder(draft) {
+      return run(async () => {
+        const folder = await desktop.createFolder(draft);
+        set((state) => ({ folders: [...state.folders, folder] }));
+        return folder;
+      });
+    },
+
+    async renameFolder(id, name) {
+      const folder = get().folders.find((candidate) => candidate.id === id);
+      if (!folder || folder.name === name) return true;
+      const previousName = folder.name;
+      const succeeded = await run(async () => {
+        const renamed = await desktop.renameFolder(id, name);
+        set((state) => ({
+          folders: state.folders.map((candidate) => candidate.id === id ? renamed : candidate),
+        }));
+        return true;
+      });
+      if (!succeeded) return false;
+      remember({
+        undo: async () => { await desktop.renameFolder(id, previousName); },
+        redo: async () => { await desktop.renameFolder(id, name); },
+      });
+      return true;
+    },
+
+    async moveFolder(id, parentId) {
+      const folder = get().folders.find((candidate) => candidate.id === id);
+      if (!folder || folder.parentId === parentId) return true;
+      const previousParentId = folder.parentId;
+      const succeeded = await run(async () => {
+        const moved = await desktop.moveFolder(id, parentId);
+        set((state) => ({
+          folders: state.folders.map((candidate) => candidate.id === id ? moved : candidate),
+        }));
+        return true;
+      });
+      if (!succeeded) return false;
+      remember({
+        undo: async () => { await desktop.moveFolder(id, previousParentId); },
+        redo: async () => { await desktop.moveFolder(id, parentId); },
+      });
+      return true;
+    },
+
+    async deleteFolder(id) {
+      const folder = get().folders.find((candidate) => candidate.id === id);
+      if (!folder) return false;
+      const succeeded = await run(async () => {
+        await desktop.deleteFolder(id);
+        set((state) => ({
+          folders: state.folders
+            .filter((candidate) => candidate.id !== id)
+            .map((candidate) => candidate.parentId === id
+              ? { ...candidate, parentId: folder.parentId }
+              : candidate),
+          meetings: state.meetings.map((meeting) => meeting.folderId === id
+            ? { ...meeting, folderId: folder.parentId }
+            : meeting),
+        }));
+        return true;
+      });
+      return succeeded === true;
     },
 
     async createMeeting(draft) {
@@ -474,15 +571,17 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     },
 
     async moveMeeting(id, projectId) {
-      const targetCount = get().meetings.filter((meeting) => meeting.projectId === projectId).length;
-      return get().reorderMeeting(id, projectId, targetCount);
+      const targetCount = get().meetings.filter(
+        (meeting) => meeting.projectId === projectId && meeting.folderId === null,
+      ).length;
+      return get().reorderMeeting(id, { projectId, folderId: null, index: targetCount });
     },
 
-    async reorderMeeting(id, projectId, index) {
+    async reorderMeeting(id, target) {
       const before = currentPlacements();
-      const after = placementsAfterMove(id, projectId, index);
+      const after = placementsAfterMove(id, target);
       const succeeded = await applyPlacements(before, after);
-      if (succeeded) set({ selectedProjectId: projectId });
+      if (succeeded) set({ selectedProjectId: target.projectId });
       return succeeded;
     },
 

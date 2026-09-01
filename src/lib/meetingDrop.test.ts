@@ -6,20 +6,26 @@ const meetings = [meeting("a", null, 0), meeting("b", null, 1), meeting("c", nul
 
 describe("meaningfulMeetingDrop", () => {
   it("hides both insertion points that leave a recording in place", () => {
-    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, index: 1 })).toBeNull();
-    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, index: 2 })).toBeNull();
+    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, folderId: null, index: 1 })).toBeNull();
+    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, folderId: null, index: 2 })).toBeNull();
   });
 
   it("keeps insertion points that change the order", () => {
-    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, index: 0 }))
-      .toEqual({ projectId: null, index: 0 });
-    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, index: 3 }))
-      .toEqual({ projectId: null, index: 3 });
+    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, folderId: null, index: 0 }))
+      .toEqual({ projectId: null, folderId: null, index: 0 });
+    expect(meaningfulMeetingDrop(meetings, "b", { projectId: null, folderId: null, index: 3 }))
+      .toEqual({ projectId: null, folderId: null, index: 3 });
   });
 
   it("keeps moves into another project", () => {
-    expect(meaningfulMeetingDrop(meetings, "b", { projectId: "project", index: 0 }))
-      .toEqual({ projectId: "project", index: 0 });
+    expect(meaningfulMeetingDrop(meetings, "b", { projectId: "project", folderId: null, index: 0 }))
+      .toEqual({ projectId: "project", folderId: null, index: 0 });
+  });
+
+  it("keeps moves into a folder of the same project", () => {
+    const projectMeetings = [meeting("a", "project", 0), meeting("b", "project", 1)];
+    expect(meaningfulMeetingDrop(projectMeetings, "b", { projectId: "project", folderId: "folder", index: 0 }))
+      .toEqual({ projectId: "project", folderId: "folder", index: 0 });
   });
 });
 
@@ -27,6 +33,7 @@ function meeting(id: string, projectId: string | null, position: number): Meetin
   return {
     id,
     projectId,
+    folderId: null,
     position,
     title: id,
     status: "ready",

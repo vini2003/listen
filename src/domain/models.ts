@@ -8,9 +8,25 @@ export interface Project {
   createdAt: string;
 }
 
+export interface Folder {
+  id: string;
+  projectId: string;
+  parentId: string | null;
+  name: string;
+  position: number;
+  createdAt: string;
+}
+
+export interface FolderDraft {
+  projectId: string;
+  parentId: string | null;
+  name: string;
+}
+
 export interface Meeting {
   id: string;
   projectId: string | null;
+  folderId: string | null;
   position: number;
   title: string;
   status: MeetingStatus;
@@ -72,6 +88,7 @@ export interface AudioDevice {
 export interface MeetingPlacement {
   id: string;
   projectId: string | null;
+  folderId: string | null;
   position: number;
 }
 
@@ -114,6 +131,7 @@ export interface AppSettings {
 
 export interface WorkspaceSnapshot {
   projects: Project[];
+  folders: Folder[];
   meetings: Meeting[];
   people: Person[];
   segments: TranscriptSegment[];

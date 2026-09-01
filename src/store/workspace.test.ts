@@ -8,6 +8,7 @@ const service = vi.hoisted(() => ({
   assignSpeaker: vi.fn(),
   findVoiceEnrollmentSegment: vi.fn(),
   enrollVoiceProfile: vi.fn(),
+  reorderMeetings: vi.fn(),
 }));
 
 vi.mock("../services/desktop", () => ({ desktop: service }));
@@ -17,6 +18,7 @@ import { useWorkspace } from "./workspace";
 const firstMeeting: Meeting = {
   id: "meeting-1",
   projectId: null,
+  folderId: null,
   position: 0,
   title: "First",
   status: "ready",
@@ -42,6 +44,7 @@ const selectedSegment: TranscriptSegment = {
 
 const snapshot: WorkspaceSnapshot = {
   projects: [],
+  folders: [],
   meetings: [firstMeeting, { ...firstMeeting, id: "meeting-2", position: 1, title: "Second" }],
   people: [],
   segments: [],
@@ -120,6 +123,56 @@ describe("workspace loading", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(useWorkspace.getState().segments).toEqual([selectedSegment]);
     expect(useWorkspace.getState().segmentsLoading).toBe(false);
+  });
+});
+
+describe("folder placement", () => {
+  beforeEach(() => {
+    service.loadMeetingSegments.mockReset().mockResolvedValue([]);
+    service.reorderMeetings.mockReset().mockResolvedValue(undefined);
+    service.loadWorkspace.mockReset().mockResolvedValue(structuredClone({
+      ...snapshot,
+      projects: [{ id: "project-1", name: "Leads", position: 0, createdAt: "2026-08-31T00:00:00Z" }],
+      folders: [{
+        id: "folder-1",
+        projectId: "project-1",
+        parentId: null,
+        name: "August",
+        position: 0,
+        createdAt: "2026-08-31T00:00:00Z",
+      }],
+      meetings: [
+        { ...firstMeeting, projectId: "project-1" },
+        { ...firstMeeting, id: "meeting-2", projectId: "project-1", position: 1, title: "Second" },
+      ],
+    }));
+  });
+
+  it("moves a recording into a folder and re-indexes both groups", async () => {
+    await useWorkspace.getState().load();
+
+    await expect(useWorkspace.getState().reorderMeeting(
+      "meeting-1",
+      { projectId: "project-1", folderId: "folder-1", index: 0 },
+    )).resolves.toBe(true);
+
+    expect(service.reorderMeetings).toHaveBeenCalledWith([
+      { id: "meeting-2", projectId: "project-1", folderId: null, position: 0 },
+      { id: "meeting-1", projectId: "project-1", folderId: "folder-1", position: 0 },
+    ]);
+    const moved = useWorkspace.getState().meetings.find((meeting) => meeting.id === "meeting-1");
+    expect(moved?.folderId).toBe("folder-1");
+  });
+
+  it("treats a drop back onto the same spot as a no-op", async () => {
+    await useWorkspace.getState().load();
+
+    await expect(useWorkspace.getState().reorderMeeting(
+      "meeting-1",
+      { projectId: "project-1", folderId: null, index: 0 },
+    )).resolves.toBe(true);
+
+    expect(service.reorderMeetings).not.toHaveBeenCalled();
   });
 });
 
