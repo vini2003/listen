@@ -111,14 +111,15 @@ pub async fn transcribe_meeting(
     let priority_ids = priority_candidate_ids(database, &meeting, &settings)?;
     let all_profiles = database.voice_profiles()?;
     // "Label this person automatically" off also turns off local-microphone attribution.
-    let local_speaker_disabled = settings
-        .local_speaker_person_id
-        .as_ref()
-        .is_some_and(|person_id| {
-            all_profiles
-                .iter()
-                .any(|profile| &profile.person_id == person_id && profile.status == "disabled")
-        });
+    let local_speaker_disabled =
+        settings
+            .local_speaker_person_id
+            .as_ref()
+            .is_some_and(|person_id| {
+                all_profiles
+                    .iter()
+                    .any(|profile| &profile.person_id == person_id && profile.status == "disabled")
+            });
     let (priority_profiles, general_profiles): (Vec<_>, Vec<_>) = all_profiles
         .into_iter()
         .filter(|profile| profile.status == "ready")

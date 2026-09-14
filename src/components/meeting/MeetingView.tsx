@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useState, type CSSProperties } from "react";
+import { memo, useCallback, useState, type CSSProperties } from "react";
 import type { Meeting } from "../../domain/models";
 import { useMeetingPlayback } from "../../hooks/useMeetingPlayback";
 import type { SettingsSection } from "../dialogs/SettingsDialog";
@@ -14,9 +14,12 @@ interface MeetingViewProps {
   onOpenSettings: (section?: SettingsSection) => void;
 }
 
-export function MeetingView({ meeting, onOpenPeople, onOpenSettings }: MeetingViewProps) {
+function MeetingViewImpl({ meeting, onOpenPeople, onOpenSettings }: MeetingViewProps) {
   const [wideChatWidth, setWideChatWidth] = useState(readWideChatWidth);
   const [askClearance, setAskClearance] = useState(0);
+  const saveWidePanelWidth = useCallback((width: number) => {
+    try { window.localStorage.setItem("listen.askWidePanelWidth", String(width)); } catch { /* Optional preference. */ }
+  }, []);
   const playback = useMeetingPlayback(meeting);
 
   return (
@@ -40,9 +43,7 @@ export function MeetingView({ meeting, onOpenPeople, onOpenSettings }: MeetingVi
         onPanelClearanceChange={setAskClearance}
         widePanelWidth={wideChatWidth}
         onWidePanelWidthChange={setWideChatWidth}
-        onWidePanelResizeEnd={(width) => {
-          try { window.localStorage.setItem("listen.askWidePanelWidth", String(width)); } catch { /* Optional preference. */ }
-        }}
+        onWidePanelResizeEnd={saveWidePanelWidth}
       />
     </motion.main>
   );
@@ -55,3 +56,5 @@ function readWideChatWidth(): number {
   } catch { /* Optional preference. */ }
   return 430;
 }
+
+export const MeetingView = memo(MeetingViewImpl);

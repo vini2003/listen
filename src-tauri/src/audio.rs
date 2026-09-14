@@ -564,21 +564,44 @@ fn start_pulse_source_stream(
         .name(format!("listen-pulse-{prefix}"))
         .spawn(move || {
             let mut bytes = [0_u8; 8_192];
+            let mut samples = Vec::with_capacity(4_096);
+            let mut pending_byte = None;
             loop {
                 let read = match stdout.read(&mut bytes) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                     Ok(read) => read,
                 };
-                let samples = bytes[..read - read % 2]
-                    .chunks_exact(2)
-                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                    .collect::<Vec<_>>();
+                decode_pcm16(&bytes[..read], &mut pending_byte, &mut samples);
                 write_i16(&samples, &callback_writer, &paused, &level);
             }
         })
         .map_err(|error| AppError::Audio(format!("Could not start PulseAudio reader: {error}")))?;
 
     Ok((CaptureStream::Pulse(PulseCapture { child, reader }), writer))
+}
+
+// Pipe reads may split a PCM sample at any byte, including between channels.
+#[cfg(any(target_os = "linux", test))]
+fn decode_pcm16(bytes: &[u8], pending: &mut Option<u8>, output: &mut Vec<i16>) {
+    output.clear();
+    if bytes.is_empty() {
+        return;
+    }
+    let offset = if let Some(first) = pending.take() {
+        output.push(i16::from_le_bytes([first, bytes[0]]));
+        1
+    } else {
+        0
+    };
+    let mut pairs = bytes[offset..].chunks_exact(2);
+    output.extend(
+        pairs
+            .by_ref()
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]])),
+    );
+    *pending = pairs.remainder().first().copied();
 }
 
 struct SegmentWriter {
@@ -1131,5 +1154,29 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("read finalized recording");
         assert_eq!(samples, [100, -100]);
+    }
+}
+
+#[cfg(test)]
+mod pcm_boundary_tests {
+    use super::decode_pcm16;
+
+    #[test]
+    fn preserves_samples_at_every_pipe_read_boundary() {
+        let expected = [i16::MIN, -257, -1, 0, 1, 256, i16::MAX];
+        let bytes: Vec<u8> = expected.iter().flat_map(|n| n.to_le_bytes()).collect();
+        for chunk_size in 1..=bytes.len() {
+            let mut pending = None;
+            let mut buffer = Vec::with_capacity(bytes.len() / 2);
+            let mut actual = Vec::new();
+            for chunk in bytes.chunks(chunk_size) {
+                decode_pcm16(chunk, &mut pending, &mut buffer);
+                actual.extend_from_slice(&buffer);
+                decode_pcm16(&[], &mut pending, &mut buffer);
+                assert!(buffer.is_empty());
+            }
+            assert_eq!(actual, expected, "chunk size {chunk_size}");
+            assert!(pending.is_none());
+        }
     }
 }

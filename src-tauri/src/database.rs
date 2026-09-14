@@ -1788,7 +1788,9 @@ mod tests {
         );
         assert_eq!(database.folders().expect("folders").len(), 1);
 
-        database.delete_project(&project.id).expect("delete project");
+        database
+            .delete_project(&project.id)
+            .expect("delete project");
         let meetings = database.meetings().expect("meetings");
         assert_eq!(meetings[0].project_id, None);
         assert_eq!(meetings[0].folder_id, None);

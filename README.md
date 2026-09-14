@@ -52,6 +52,29 @@ npm run build:portable # raw executable for local development
 
 Cross-platform releases are built and published through GitHub Actions. See [the release guide](docs/RELEASING.md) for updater signing, required repository secrets, versioning, and the release workflow.
 
+### Linux rendering
+
+Listen defaults to WebKit's shared-memory frame transport on Linux. This keeps
+the accelerated renderer available while avoiding hardware-buffer allocation
+failures seen with some graphics drivers. No wrapper script is required.
+
+Explicit environment settings take precedence. To restore the older compatibility
+mode if rendering fails:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 /path/to/listen
+```
+
+To test hardware-buffer transport instead:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=0 WEBKIT_DMABUF_RENDERER_FORCE_SHM=0 /path/to/listen
+```
+
+These options also work with the AppImage. Windows and macOS rendering defaults
+are unaffected. See [the graphics investigation](docs/graphics-investigation.md)
+for measurements and limitations.
+
 ## Verification
 
 ```sh

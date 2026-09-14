@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useEffect, useState, type FormEvent } from "react";
 import { defaultMeetingTitle } from "../../lib/format";
 import { useWorkspace } from "../../store/workspace";
@@ -10,7 +11,10 @@ interface CreateProjectDialogProps {
 }
 
 export function CreateProjectDialog({ open, onClose }: CreateProjectDialogProps) {
-  const { createProject, busy } = useWorkspace();
+  const { createProject, busy } = useWorkspace(useShallow((state) => ({
+    createProject: state.createProject,
+    busy: state.busy,
+  })));
   const [name, setName] = useState("");
 
   useEffect(() => { if (open) setName(""); }, [open]);
@@ -38,7 +42,11 @@ interface CreateMeetingDialogProps {
 }
 
 export function CreateMeetingDialog({ open, initialProjectId, onClose }: CreateMeetingDialogProps) {
-  const { projects, createMeeting, busy } = useWorkspace();
+  const { projects, createMeeting, busy } = useWorkspace(useShallow((state) => ({
+    projects: state.projects,
+    createMeeting: state.createMeeting,
+    busy: state.busy,
+  })));
   const [title, setTitle] = useState(defaultMeetingTitle());
   const [projectId, setProjectId] = useState<string | null>(initialProjectId);
 
