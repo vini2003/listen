@@ -1,3 +1,5 @@
+import { useEventCallback } from "./hooks/useEventCallback";
+import { useShallow } from "zustand/react/shallow";
 import { useEffect, useMemo, useState } from "react";
 import { CreateMeetingDialog, CreateProjectDialog } from "./components/dialogs/CreateDialogs";
 import { PeopleDialog } from "./components/dialogs/PeopleDialog";
@@ -20,7 +22,19 @@ import {
 import { useWorkspace } from "./store/workspace";
 
 export default function App() {
-  const workspace = useWorkspace();
+  const workspace = useWorkspace(useShallow((state) => ({
+    dismissToast: state.dismissToast,
+    load: state.load,
+    loading: state.loading,
+    meetings: state.meetings,
+    redo: state.redo,
+    selectMeeting: state.selectMeeting,
+    selectedMeetingId: state.selectedMeetingId,
+    selectedProjectId: state.selectedProjectId,
+    settings: state.settings,
+    toasts: state.toasts,
+    undo: state.undo,
+  })));
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [createMeetingOpen, setCreateMeetingOpen] = useState(false);
   const [newMeetingProjectId, setNewMeetingProjectId] = useState<string | null>(null);
@@ -125,9 +139,10 @@ export default function App() {
     setCreateMeetingOpen(true);
   }
 
-  function openSettings(section?: SettingsSection): void {
+  const openSettings = useEventCallback((section?: SettingsSection): void => {
     setSettingsOpen({ section });
-  }
+  });
+  const openPeople = useEventCallback(() => setPeopleOpen(true));
 
   if (workspace.loading) {
     return <div className="app-loading"><span className="brand-loading-mark">L</span><p>Opening Listen…</p></div>;
@@ -138,7 +153,7 @@ export default function App() {
       <Sidebar
         onCreateProject={() => setCreateProjectOpen(true)}
         onCreateMeeting={openCreateMeeting}
-        onOpenPeople={() => setPeopleOpen(true)}
+        onOpenPeople={openPeople}
         onOpenSettings={() => openSettings()}
       />
 
@@ -146,7 +161,7 @@ export default function App() {
         {selectedMeeting ? (
           <MeetingView
             meeting={selectedMeeting}
-            onOpenPeople={() => setPeopleOpen(true)}
+            onOpenPeople={openPeople}
             onOpenSettings={openSettings}
           />
         ) : (

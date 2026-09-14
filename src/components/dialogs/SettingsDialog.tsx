@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, Fingerprint, LockKeyhole, MonitorSpeaker, Save, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useWorkspace } from "../../store/workspace";
@@ -13,7 +14,17 @@ interface SettingsDialogProps {
 }
 
 export function SettingsDialog({ open, onClose, initialSection }: SettingsDialogProps) {
-  const { settings, devices, people, updateSettings, eraseAllVoiceProfiles, setApiKey, setPyannoteApiKey, openDiagnostics, busy } = useWorkspace();
+  const { settings, devices, people, updateSettings, eraseAllVoiceProfiles, setApiKey, setPyannoteApiKey, openDiagnostics, busy } = useWorkspace(useShallow((state) => ({
+    settings: state.settings,
+    devices: state.devices,
+    people: state.people,
+    updateSettings: state.updateSettings,
+    eraseAllVoiceProfiles: state.eraseAllVoiceProfiles,
+    setApiKey: state.setApiKey,
+    setPyannoteApiKey: state.setPyannoteApiKey,
+    openDiagnostics: state.openDiagnostics,
+    busy: state.busy,
+  })));
   const [pyannoteKey, setPyannoteKey] = useState("");
   const [openAiKey, setOpenAiKey] = useState("");
   const [showPyannoteKey, setShowPyannoteKey] = useState(false);

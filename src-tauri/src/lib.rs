@@ -52,7 +52,7 @@ struct ChatUpdatedEvent {
     scope_id: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
     let mut settings = state.database.settings()?;
     settings.api_key_configured = credentials::has_openai_key()?;
@@ -96,7 +96,7 @@ fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_assistant_context(
     state: State<'_, AppState>,
     meeting_id: String,
@@ -226,7 +226,7 @@ fn focus_main_window_reference(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_meeting_segments(
     state: State<'_, AppState>,
     meeting_id: String,
@@ -525,12 +525,12 @@ async fn set_pyannote_api_key(api_key: String) -> AppResult<bool> {
     credentials::set_pyannote_key(api_key)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_diagnostics(state: State<'_, AppState>) -> AppResult<()> {
     state.diagnostics.open()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_recording(
     state: State<'_, AppState>,
     recorder: State<'_, RecordingManager>,
@@ -551,7 +551,7 @@ fn start_recording(
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_recording_paused(
     recorder: State<'_, RecordingManager>,
     meeting_id: String,
@@ -560,7 +560,9 @@ fn set_recording_paused(
     recorder.set_paused(&meeting_id, paused)
 }
 
-#[tauri::command]
+// These reads share the recording lock with startup/shutdown; keep lock waits
+// off the window event loop as well as the expensive recording operations.
+#[tauri::command(async)]
 fn recording_levels(
     recorder: State<'_, RecordingManager>,
     meeting_id: String,
@@ -568,7 +570,7 @@ fn recording_levels(
     recorder.levels(&meeting_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_recording(
     state: State<'_, AppState>,
     recorder: State<'_, RecordingManager>,
@@ -583,7 +585,7 @@ async fn transcribe_meeting(state: State<'_, AppState>, meeting_id: String) -> A
     transcribe_and_mark(&state, &meeting_id).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_segment_audio(
     state: State<'_, AppState>,
     meeting_id: String,

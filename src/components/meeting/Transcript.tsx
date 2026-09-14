@@ -1,5 +1,7 @@
+import { useEventCallback } from "../../hooks/useEventCallback";
+import { useShallow } from "zustand/react/shallow";
 import { Check, ChevronDown, Copy, KeyRound, LoaderCircle, Mic2, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
@@ -28,7 +30,17 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     segmentsLoading,
     loadSegmentAudio,
     deleteTranscriptSegments,
-  } = useWorkspace();
+  } = useWorkspace(useShallow((state) => ({
+    segments: state.segments,
+    people: state.people,
+    assignSpeaker: state.assignSpeaker,
+    settings: state.settings,
+    transcribeMeeting: state.transcribeMeeting,
+    busy: state.busy,
+    segmentsLoading: state.segmentsLoading,
+    loadSegmentAudio: state.loadSegmentAudio,
+    deleteTranscriptSegments: state.deleteTranscriptSegments,
+  })));
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
@@ -67,7 +79,7 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     setPlayingAudioId(null);
   }, [transport.playing]);
 
-  async function togglePlayback(segment: TranscriptSegment): Promise<void> {
+  const togglePlayback = useEventCallback(async (segment: TranscriptSegment): Promise<void> => {
     transport.pause();
     const currentAudio = audioRef.current;
     if (playingAudioId === segment.id && currentAudio && !currentAudio.paused) {
@@ -105,22 +117,30 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     } finally {
       setLoadingAudioId((current) => current === segment.id ? null : current);
     }
-  }
+  });
 
-  async function copyTurn(segment: TranscriptTurn): Promise<void> {
+  const copyTurn = useEventCallback(async (segment: TranscriptTurn): Promise<void> => {
     await navigator.clipboard.writeText(segment.text);
     setCopiedId(segment.id);
     window.setTimeout(() => setCopiedId((current) => current === segment.id ? null : current), 1_400);
-  }
+  });
 
-  async function deleteTurn(segment: TranscriptTurn): Promise<void> {
+  const deleteTurn = useEventCallback(async (segment: TranscriptTurn): Promise<void> => {
     if (playingAudioId === segment.id) {
       disposeAudio(audioRef.current);
       audioRef.current = null;
       setPlayingAudioId(null);
     }
     await deleteTranscriptSegments(segment.sourceSegmentIds);
-  }
+  });
+
+  const assignTurn = useEventCallback((segment: TranscriptTurn, personId: string | null) => {
+    void assignSpeaker(segment.meetingId, segment.speakerLabel, personId);
+  });
+  const seekTurn = useEventCallback((segment: TranscriptTurn) => {
+    if (transport.status !== "idle") transport.seek(segment.startMs);
+    else void togglePlayback(segment);
+  });
 
   const transcriptState = transcriptStateFor({
     status: meeting.status,
@@ -218,20 +238,17 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
           segment={segment}
           people={people}
           anonymousName={anonymousNames.get(segment.speakerLabel) ?? "Speaker"}
-          onAssign={(personId) => void assignSpeaker(meeting.id, segment.speakerLabel, personId)}
+          onAssign={assignTurn}
           onOpenPeople={onOpenPeople}
           canPlay={Boolean(meeting.audioDirectory)}
           loadingAudio={loadingAudioId === segment.id}
           playingAudio={playingAudioId === segment.id}
           isCurrent={transport.playing && segment.startMs <= transport.currentMs && transport.currentMs < segment.endMs}
           copied={copiedId === segment.id}
-          onTogglePlayback={() => void togglePlayback(segment)}
-          onTimestampPress={() => {
-            if (transport.status !== "idle") transport.seek(segment.startMs);
-            else void togglePlayback(segment);
-          }}
-          onCopy={() => void copyTurn(segment)}
-          onDelete={() => void deleteTurn(segment)}
+          onTogglePlayback={togglePlayback}
+          onTimestampPress={seekTurn}
+          onCopy={copyTurn}
+          onDelete={deleteTurn}
         />
       ))}
     </div>
@@ -251,20 +268,20 @@ interface TranscriptRowProps {
   segment: TranscriptTurn;
   people: Person[];
   anonymousName: string;
-  onAssign: (personId: string | null) => void;
+  onAssign: (segment: TranscriptTurn, personId: string | null) => void;
   onOpenPeople: () => void;
   canPlay: boolean;
   loadingAudio: boolean;
   playingAudio: boolean;
   isCurrent: boolean;
   copied: boolean;
-  onTogglePlayback: () => void;
-  onTimestampPress: () => void;
-  onCopy: () => void;
-  onDelete: () => void;
+  onTogglePlayback: (segment: TranscriptTurn) => void;
+  onTimestampPress: (segment: TranscriptTurn) => void;
+  onCopy: (segment: TranscriptTurn) => void;
+  onDelete: (segment: TranscriptTurn) => void;
 }
 
-function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, isCurrent, copied, onTogglePlayback, onTimestampPress, onCopy, onDelete }: TranscriptRowProps) {
+const TranscriptRow = memo(function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople, canPlay, loadingAudio, playingAudio, isCurrent, copied, onTogglePlayback, onTimestampPress, onCopy, onDelete }: TranscriptRowProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useDismissableLayer<HTMLDivElement>(open, () => setOpen(false));
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -298,12 +315,12 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
             </button>
             {open ? (
               <div ref={menuPanelRef} className="speaker-menu" role="menu" aria-label={`Assign ${speakerName} to a person`} onKeyDown={handleMenuKeyDown}>
-                <button role="menuitem" onClick={() => { onAssign(null); setOpen(false); }}>
+                <button role="menuitem" onClick={() => { onAssign(segment, null); setOpen(false); }}>
                   <Avatar label={anonymousName.charAt(0).toUpperCase()} size="small" />
                   <span>{anonymousName}</span>
                 </button>
                 {people.map((candidate) => (
-                  <button role="menuitem" key={candidate.id} onClick={() => { onAssign(candidate.id); setOpen(false); }}>
+                  <button role="menuitem" key={candidate.id} onClick={() => { onAssign(segment, candidate.id); setOpen(false); }}>
                     <Avatar person={candidate} size="small" />
                     <span>{candidate.fullName}</span>
                     {candidate.id === segment.personId ? <span className="selection-check">✓</span> : null}
@@ -324,7 +341,7 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
           <button
             type="button"
             className={`timestamp-button ${playingAudio ? "is-playing" : ""} ${loadingAudio ? "is-loading" : ""}`}
-            onClick={onTimestampPress}
+            onClick={() => onTimestampPress(segment)}
             disabled={!canPlay || loadingAudio}
             aria-label={playingAudio ? `Pause audio at ${formatDuration(segment.startMs)}` : `Play audio from ${formatDuration(segment.startMs)}`}
             title={canPlay ? (playingAudio ? "Pause passage" : "Play from here") : undefined}
@@ -342,7 +359,7 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
       <div className="message-action-bar transcript-message-actions" aria-label={`Actions for ${speakerName}'s message`}>
         <button
           type="button"
-          onClick={onTogglePlayback}
+          onClick={() => onTogglePlayback(segment)}
           aria-label={playingAudio ? `Pause audio for ${speakerName}` : `Play audio for ${speakerName}`}
           title={playingAudio ? "Pause passage" : "Play passage"}
           disabled={!canPlay || loadingAudio}
@@ -350,16 +367,16 @@ function TranscriptRow({ segment, people, anonymousName, onAssign, onOpenPeople,
         >
           {loadingAudio ? <LoaderCircle className="segment-playback-spinner" size={13} /> : playingAudio ? <Pause size={12} fill="currentColor" /> : <Play size={12} fill="currentColor" />}
         </button>
-        <button type="button" onClick={onCopy} aria-label={copied ? "Message copied" : "Copy message"} title="Copy">
+        <button type="button" onClick={() => onCopy(segment)} aria-label={copied ? "Message copied" : "Copy message"} title="Copy">
           {copied ? <Check size={13} /> : <Copy size={13} />}
         </button>
-        <button className="danger-action" type="button" onClick={onDelete} aria-label="Delete message" title="Delete · Ctrl+Z to undo">
+        <button className="danger-action" type="button" onClick={() => onDelete(segment)} aria-label="Delete message" title="Delete · Ctrl+Z to undo">
           <Trash2 size={13} />
         </button>
       </div>
     </article>
   );
-}
+});
 
 function autoIdentityTitle(segment: TranscriptSegment): string {
   if (segment.identitySource === "local_microphone") return "Labeled automatically from your microphone";

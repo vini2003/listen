@@ -1,3 +1,5 @@
+import { memo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   AudioLines,
   Check,
@@ -61,7 +63,7 @@ interface MeetingChatProps {
 const ReactMarkdown = lazy(() => import("react-markdown"));
 const DEFAULT_PANEL_HEIGHT = 360;
 
-export function MeetingChat({
+function MeetingChatImpl({
   meeting,
   widePanelWidth = 430,
   onWidePanelWidthChange = () => {},
@@ -80,7 +82,16 @@ export function MeetingChat({
     chatBusy,
     loadChat,
     completeChat,
-  } = useWorkspace();
+  } = useWorkspace(useShallow((state) => ({
+    settings: state.settings,
+    meetings: state.meetings,
+    selectMeeting: state.selectMeeting,
+    chatMessages: state.chatMessages,
+    chatLoading: state.chatLoading,
+    chatBusy: state.chatBusy,
+    loadChat: state.loadChat,
+    completeChat: state.completeChat,
+  })));
   const responsiveWideLayout = useWideChatLayout();
   const wideLayout = mode === "embedded" && responsiveWideLayout;
   const [expanded, setExpanded] = useState(false);
@@ -650,3 +661,5 @@ function useWideChatLayout(): boolean {
 
   return wide;
 }
+
+export const MeetingChat = memo(MeetingChatImpl);

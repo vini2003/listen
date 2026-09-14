@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Fingerprint, ImageUp, Mic2, Pencil, Plus, Save, Sparkles, Trash2, UserRound } from "lucide-react";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import type { Person, PersonDraft } from "../../domain/models";
@@ -17,7 +18,17 @@ const emptyDraft: PersonDraft = {
 };
 
 export function PeopleDialog({ open, onClose }: PeopleDialogProps) {
-  const { people, settings, createPerson, updatePerson, deletePerson, eraseVoiceProfile, enableVoiceLabeling, updateSettings, busy } = useWorkspace();
+  const { people, settings, createPerson, updatePerson, deletePerson, eraseVoiceProfile, enableVoiceLabeling, updateSettings, busy } = useWorkspace(useShallow((state) => ({
+    people: state.people,
+    settings: state.settings,
+    createPerson: state.createPerson,
+    updatePerson: state.updatePerson,
+    deletePerson: state.deletePerson,
+    eraseVoiceProfile: state.eraseVoiceProfile,
+    enableVoiceLabeling: state.enableVoiceLabeling,
+    updateSettings: state.updateSettings,
+    busy: state.busy,
+  })));
   const [editing, setEditing] = useState<Person | "new" | null>(null);
   const [draft, setDraft] = useState<PersonDraft>(emptyDraft);
 

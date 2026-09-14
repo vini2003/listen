@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { LoaderCircle, MessageSquareText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AssistantContext } from "../../domain/models";
@@ -17,7 +18,10 @@ interface AssistantWindowProps {
 }
 
 export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
-  const { toasts, dismissToast } = useWorkspace();
+  const { toasts, dismissToast } = useWorkspace(useShallow((state) => ({
+    toasts: state.toasts,
+    dismissToast: state.dismissToast,
+  })));
   const [meetingId, setMeetingId] = useState(initialMeetingId);
   const [context, setContext] = useState<AssistantContext | null>(null);
   const [loading, setLoading] = useState(true);

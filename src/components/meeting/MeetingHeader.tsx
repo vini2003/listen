@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Folder, LoaderCircle, Pause, Pencil, Play } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Meeting } from "../../domain/models";
@@ -17,7 +18,10 @@ const STATUS_BADGES: Partial<Record<Meeting["status"], string>> = {
 };
 
 export function MeetingHeader({ meeting, playback }: MeetingHeaderProps) {
-  const { projects, renameMeeting } = useWorkspace();
+  const { projects, renameMeeting } = useWorkspace(useShallow((state) => ({
+    projects: state.projects,
+    renameMeeting: state.renameMeeting,
+  })));
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(meeting.title);
   const projectName = projects.find((project) => project.id === meeting.projectId)?.name ?? null;

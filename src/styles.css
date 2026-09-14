@@ -242,7 +242,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
 .processing-orbit svg { animation: softSpin 2.4s linear infinite; }
 @keyframes softSpin { to { transform: rotate(360deg); } }
 
-.meeting-chat { display: flex; flex-direction: column; position: absolute; z-index: 19; left: 50%; bottom: 100px; width: min(680px, calc(100% - 80px)); overflow: hidden; background: color-mix(in srgb, var(--surface-raised) 96%, transparent); border: 1px solid var(--border); border-radius: 15px; box-shadow: 0 10px 34px rgba(20, 20, 18, .1), var(--shadow-sm); transform: translateX(-50%); backdrop-filter: blur(18px); }
+.meeting-chat { display: flex; flex-direction: column; position: absolute; z-index: 19; left: 50%; bottom: 100px; width: min(680px, calc(100% - 80px)); overflow: hidden; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 15px; box-shadow: 0 10px 34px rgba(20, 20, 18, .1), var(--shadow-sm); transform: translateX(-50%); }
 .meeting-chat:focus-within { border-color: var(--border-strong); }
 .meeting-chat-panel { display: flex; flex-direction: column; position: relative; flex: 0 0 auto; height: min(var(--chat-panel-height, 360px), calc(100vh - 205px)); min-height: 0; overflow: hidden; border-bottom: 1px solid var(--border); }
 .meeting-chat-header { display: flex; align-items: center; justify-content: space-between; flex: 0 0 44px; min-width: 0; padding: 6px 9px 6px 12px; background: color-mix(in srgb, var(--surface-raised) 84%, var(--bg)); border-bottom: 1px solid var(--border); }
@@ -349,7 +349,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 
   .message-action-bar { opacity: 1; pointer-events: auto; transform: none; }
 }
 
-.recording-dock { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; position: absolute; z-index: 20; left: 50%; bottom: 24px; width: min(680px, calc(100% - 80px)); min-height: 66px; padding: 8px 12px; background: color-mix(in srgb, var(--surface-raised) 94%, transparent); border: 1px solid var(--border); border-radius: 15px; box-shadow: 0 12px 40px rgba(20, 20, 18, 0.12), var(--shadow-sm); transform: translateX(-50%); backdrop-filter: blur(18px); }
+.recording-dock { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; position: absolute; z-index: 20; left: 50%; bottom: 24px; width: min(680px, calc(100% - 80px)); min-height: 66px; padding: 8px 12px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 15px; box-shadow: 0 12px 40px rgba(20, 20, 18, 0.12), var(--shadow-sm); transform: translateX(-50%); }
 .recording-dock.is-recording { border-color: color-mix(in srgb, var(--recording) 35%, var(--border)); }
 .device-summary { display: flex; align-items: center; gap: 9px; min-width: 0; max-width: 260px; padding: 7px 8px; background: transparent; border-radius: 9px; text-align: left; }
 .device-summary:hover { background: var(--hover); }

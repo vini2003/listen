@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import {
   AudioLines,
   ChevronDown,
@@ -89,7 +90,25 @@ export function Sidebar({
     moveFolder,
     deleteFolder,
     busy,
-  } = useWorkspace();
+  } = useWorkspace(useShallow((state) => ({
+    projects: state.projects,
+    folders: state.folders,
+    meetings: state.meetings,
+    selectedMeetingId: state.selectedMeetingId,
+    selectedProjectId: state.selectedProjectId,
+    selectMeeting: state.selectMeeting,
+    reorderMeeting: state.reorderMeeting,
+    reorderProjects: state.reorderProjects,
+    renameProject: state.renameProject,
+    renameMeeting: state.renameMeeting,
+    deleteProject: state.deleteProject,
+    deleteMeeting: state.deleteMeeting,
+    createFolder: state.createFolder,
+    renameFolder: state.renameFolder,
+    moveFolder: state.moveFolder,
+    deleteFolder: state.deleteFolder,
+    busy: state.busy,
+  })));
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([
     ...projects.map((project) => project.id),
     ...folders.map((folder) => folder.id),

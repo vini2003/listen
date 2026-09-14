@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Check, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -14,7 +15,11 @@ interface ProjectActionsProps {
 }
 
 export function ProjectActions({ project, placement = "page", onCreateFolder }: ProjectActionsProps) {
-  const { renameProject, deleteProject, busy } = useWorkspace();
+  const { renameProject, deleteProject, busy } = useWorkspace(useShallow((state) => ({
+    renameProject: state.renameProject,
+    deleteProject: state.deleteProject,
+    busy: state.busy,
+  })));
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
