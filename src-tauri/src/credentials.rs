@@ -4,16 +4,13 @@ use crate::error::{AppError, AppResult};
 
 const SERVICE: &str = "app.listen.desktop";
 const OPENAI_ACCOUNT: &str = "openai-api-key";
-const PYANNOTE_ACCOUNT: &str = "pyannote-api-key";
-const VOICEPRINT_PREFIX: &str = "voiceprint-";
+/// Left by versions that sent audio to the hosted pyannote service.
+const RETIRED_PYANNOTE_ACCOUNT: &str = "pyannote-api-key";
+const RETIRED_VOICEPRINT_PREFIX: &str = "voiceprint-";
 const VOICE_PROFILE_KEY_ACCOUNT: &str = "voice-profile-master-key-v1";
 
 pub fn has_openai_key() -> AppResult<bool> {
     has_key(OPENAI_ACCOUNT)
-}
-
-pub fn has_pyannote_key() -> AppResult<bool> {
-    has_key(PYANNOTE_ACCOUNT)
 }
 
 fn has_key(account: &str) -> AppResult<bool> {
@@ -28,19 +25,6 @@ pub fn openai_key() -> AppResult<String> {
     read_key(OPENAI_ACCOUNT)
 }
 
-pub fn pyannote_key() -> AppResult<String> {
-    read_key(PYANNOTE_ACCOUNT)
-}
-
-pub fn legacy_voiceprint(person_id: &str) -> AppResult<Option<String>> {
-    let account = format!("{VOICEPRINT_PREFIX}{person_id}");
-    match entry(&account)?.get_password() {
-        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-        Ok(_) | Err(KeyringError::NoEntry) => Ok(None),
-        Err(error) => Err(credential_error(error)),
-    }
-}
-
 pub fn voice_profile_master_key() -> AppResult<Option<String>> {
     match entry(VOICE_PROFILE_KEY_ACCOUNT)?.get_password() {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
@@ -53,12 +37,21 @@ pub fn set_voice_profile_master_key(value: &str) -> AppResult<()> {
     store_key(VOICE_PROFILE_KEY_ACCOUNT, value).map(|_| ())
 }
 
-pub fn delete_legacy_voiceprint(person_id: &str) -> AppResult<()> {
-    let account = format!("{VOICEPRINT_PREFIX}{person_id}");
-    match entry(&account)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(error) => Err(credential_error(error)),
+/// Removes secrets Listen no longer uses: the pyannote API key and
+/// per-person pyannote voiceprints from before local processing.
+pub fn delete_retired_secrets(person_ids: &[String]) -> AppResult<()> {
+    let accounts = std::iter::once(RETIRED_PYANNOTE_ACCOUNT.to_string()).chain(
+        person_ids
+            .iter()
+            .map(|person_id| format!("{RETIRED_VOICEPRINT_PREFIX}{person_id}")),
+    );
+    for account in accounts {
+        match entry(&account)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => {}
+            Err(error) => return Err(credential_error(error)),
+        }
     }
+    Ok(())
 }
 
 fn read_key(account: &str) -> AppResult<String> {
@@ -80,23 +73,6 @@ pub fn set_openai_key(value: &str) -> AppResult<bool> {
         ));
     }
     store_key(OPENAI_ACCOUNT, value)
-}
-
-pub fn set_pyannote_key(value: &str) -> AppResult<bool> {
-    let value = value.trim();
-    if value.is_empty() {
-        match entry(PYANNOTE_ACCOUNT)?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => {}
-            Err(error) => return Err(credential_error(error)),
-        }
-        return Ok(false);
-    }
-    if value.len() < 12 {
-        return Err(AppError::Validation(
-            "The pyannote API key looks incomplete".to_string(),
-        ));
-    }
-    store_key(PYANNOTE_ACCOUNT, value)
 }
 
 fn store_key(account: &str, value: &str) -> AppResult<bool> {

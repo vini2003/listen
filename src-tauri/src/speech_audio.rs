@@ -197,6 +197,15 @@ fn recording_session_tracks(
 /// Writes (or reuses) a cached full-meeting mix at `<directory>/mixed.wav`.
 /// The mix is rebuilt whenever any session WAV is newer than the cached file.
 pub fn export_mixed_recording(directory: &Path) -> AppResult<PathBuf> {
+    export_mixed_recording_with_progress(directory, &mut |_| {})
+}
+
+/// [`export_mixed_recording`], reporting how much of the mix is written (0–1).
+/// A cache hit reports 1 straight away.
+pub fn export_mixed_recording_with_progress(
+    directory: &Path,
+    progress: &mut dyn FnMut(f32),
+) -> AppResult<PathBuf> {
     let output_path = directory.join("mixed.wav");
     let newest_source = recording_session_tracks(directory)?
         .into_iter()
@@ -220,7 +229,7 @@ pub fn export_mixed_recording(directory: &Path) -> AppResult<PathBuf> {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
         let temp_path = directory.join(format!("mixed-{nanos}.wav.tmp"));
-        if let Err(error) = write_mixed_recording(directory, &temp_path) {
+        if let Err(error) = write_mixed_recording(directory, &temp_path, progress) {
             let _ = fs::remove_file(&temp_path);
             return Err(error);
         }
@@ -232,7 +241,12 @@ pub fn export_mixed_recording(directory: &Path) -> AppResult<PathBuf> {
     Ok(output_path)
 }
 
-pub fn write_mixed_recording(directory: &Path, output_path: &Path) -> AppResult<i64> {
+fn write_mixed_recording(
+    directory: &Path,
+    output_path: &Path,
+    progress: &mut dyn FnMut(f32),
+) -> AppResult<i64> {
+    let total_ms = recording_duration_ms(directory)?.max(1);
     let sessions = recording_sessions(directory)?;
     let mut writer = hound::WavWriter::create(
         output_path,
@@ -255,6 +269,7 @@ pub fn write_mixed_recording(directory: &Path, output_path: &Path) -> AppResult<
                 })?;
             }
             duration_ms += part.duration_ms;
+            progress((duration_ms as f32 / total_ms as f32).min(1.0));
         }
     }
     writer
@@ -384,11 +399,6 @@ pub fn recording_source_clip(
         }
     }
     Ok(output)
-}
-
-pub fn write_normalized_wav(path: &Path, samples: &[i16]) -> AppResult<()> {
-    fs::write(path, encode_wav(samples)?)?;
-    Ok(())
 }
 
 pub fn rms(samples: &[i16]) -> f64 {
@@ -738,7 +748,7 @@ mod tests {
     fn ignores_generated_audio_when_scanning_recording_tracks() {
         let directory = tempfile::tempdir().unwrap();
         let microphone = directory.path().join("microphone-123-0000.wav");
-        let generated = directory.path().join("precision-upload-abcd.wav");
+        let generated = directory.path().join("mixed-abcd.wav");
         mono_wav(&microphone, &[1_000; 16_000]);
         mono_wav(&generated, &[2_000; 16_000]);
 

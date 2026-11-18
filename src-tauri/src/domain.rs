@@ -93,7 +93,6 @@ pub struct VoiceProfileSummary {
 #[derive(Debug, Clone)]
 pub struct StoredVoiceProfile {
     pub person_id: String,
-    pub voiceprint: Option<String>,
     pub status: String,
 }
 
@@ -171,8 +170,6 @@ pub struct AppSettings {
     pub theme: String,
     pub api_key_configured: bool,
     #[serde(default)]
-    pub pyannote_api_key_configured: bool,
-    #[serde(default)]
     pub local_speaker_person_id: Option<String>,
     #[serde(default)]
     pub prefer_local_speaker_for_microphone: bool,
@@ -187,7 +184,6 @@ impl Default for AppSettings {
             capture_system: false,
             theme: "system".to_string(),
             api_key_configured: false,
-            pyannote_api_key_configured: false,
             local_speaker_person_id: None,
             prefer_local_speaker_for_microphone: true,
         }

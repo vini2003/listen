@@ -21,15 +21,18 @@ cpal = "0.15"
 futures-util = "0.3"
 hound = "3.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+parakeet-rs = { version = "0.4.4", features = ["sortformer"] }
 parking_lot = "0.12"
 rand = "0.8"
+realfft = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset"] }
 thiserror = "2"
-tokio = { version = "1", features = ["time", "fs", "macros"] }
+tokio = { version = "1", features = ["time", "fs", "macros", "sync"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tauri-plugin-process = "2"
@@ -55,3 +58,30 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# The speech models decode audio in Rust; unoptimised they are too slow to
+# try in development builds.
+[profile.dev.package.parakeet-rs]
+opt-level = 3
+
+[profile.dev.package.ndarray]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+# The rest of the release build optimises for size; the audio maths does not.
+[profile.release.package.parakeet-rs]
+opt-level = 3
+
+[profile.release.package.ndarray]
+opt-level = 3
+
+[profile.release.package.rustfft]
+opt-level = 3
+
+[profile.release.package.realfft]
+opt-level = 3

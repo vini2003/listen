@@ -11,6 +11,8 @@ import type {
   PersonDraft,
   ProjectDraft,
   RecordingLevels,
+  SpeechModelsStatus,
+  TranscriptionProgress,
   WorkspaceSnapshot,
 } from "../domain/models";
 import { friendlyError } from "../lib/errors";
@@ -20,6 +22,7 @@ import { desktop, type RecordingRequest } from "../services/desktop";
 export interface AppToast {
   id: number;
   message: string;
+  tone: "error" | "notice";
 }
 
 interface HistoryEntry {
@@ -39,6 +42,11 @@ interface WorkspaceState extends WorkspaceSnapshot {
   chatLoading: boolean;
   chatBusy: boolean;
   toasts: AppToast[];
+  /** Null until the desktop reports which speech models are installed. */
+  speechModels: SpeechModelsStatus | null;
+  transcriptionProgress: Record<string, TranscriptionProgress>;
+  /** People whose voice is waiting to be learned or being learned, in order. */
+  voiceLearning: string[];
   canUndo: boolean;
   canRedo: boolean;
   load: () => Promise<void>;
@@ -68,7 +76,9 @@ interface WorkspaceState extends WorkspaceSnapshot {
   enableVoiceLabeling: (personId: string) => Promise<boolean>;
   updateSettings: (settings: AppSettings) => Promise<boolean>;
   setApiKey: (apiKey: string) => Promise<boolean>;
-  setPyannoteApiKey: (apiKey: string) => Promise<boolean>;
+  downloadSpeechModels: () => Promise<boolean>;
+  cancelSpeechModelsDownload: () => Promise<void>;
+  removeSpeechModels: () => Promise<boolean>;
   openDiagnostics: () => Promise<boolean>;
   startRecording: (request: RecordingRequest) => Promise<boolean>;
   stopRecording: (meetingId: string) => Promise<boolean>;
@@ -98,7 +108,6 @@ const emptySnapshot: WorkspaceSnapshot = {
     captureSystem: true,
     theme: "system",
     apiKeyConfigured: false,
-    pyannoteApiKeyConfigured: false,
     localSpeakerPersonId: null,
     preferLocalSpeakerForMicrophone: true,
   },
@@ -106,14 +115,35 @@ const emptySnapshot: WorkspaceSnapshot = {
 
 export const useWorkspace = create<WorkspaceState>((set, get) => {
   let recoveryStarted = false;
+  let desktopEventsStarted = false;
   let nextToastId = 1;
   const undoStack: HistoryEntry[] = [];
   const redoStack: HistoryEntry[] = [];
   const enrollmentInFlight = new Set<string>();
 
   function showError(error: unknown): void {
-    const toast = { id: nextToastId++, message: friendlyError(error) };
+    const toast: AppToast = { id: nextToastId++, message: friendlyError(error), tone: "error" };
     set((state) => ({ toasts: [...state.toasts.slice(-3), toast] }));
+  }
+
+  function showNotice(message: string): void {
+    const toast: AppToast = { id: nextToastId++, message, tone: "notice" };
+    set((state) => ({ toasts: [...state.toasts.slice(-3), toast] }));
+  }
+
+  function personName(personId: string): string {
+    const person = get().people.find((candidate) => candidate.id === personId);
+    return person?.nickname || person?.fullName.split(/\s+/)[0] || "this person";
+  }
+
+  function queueVoiceLearning(personIds: string[]): void {
+    set((state) => ({
+      voiceLearning: [...state.voiceLearning, ...personIds.filter((id) => !state.voiceLearning.includes(id))],
+    }));
+  }
+
+  function finishVoiceLearning(personId: string): void {
+    set((state) => ({ voiceLearning: state.voiceLearning.filter((id) => id !== personId) }));
   }
 
   function syncHistoryState(): void {
@@ -160,6 +190,109 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     }
   }
 
+  /** Explains a voice that could not be learned. Returns whether one was learned. */
+  function reportVoiceOutcome(personId: string): boolean {
+    const profile = get().people.find((candidate) => candidate.id === personId)?.voiceProfile;
+    if (profile?.status === "ready") return true;
+    if (profile?.status === "failed") {
+      showError(`Couldn't learn ${personName(personId)}'s voice. ${profile.lastError ?? "Open the log for details."}`);
+    } else if (profile?.status === "pending_sample" && profile.lastError) {
+      showNotice(`${personName(personId)} needs at least 8 seconds of clear, solo speech before Listen can recognise them. Label more of their passages.`);
+    }
+    return false;
+  }
+
+  function speechReady(): boolean {
+    return get().speechModels?.state === "ready";
+  }
+
+  function storeSpeechModels(status: SpeechModelsStatus): void {
+    const wasReady = speechReady();
+    set({ speechModels: status });
+    if (!wasReady && status.state === "ready") void enrollPendingPeople();
+  }
+
+  function storeProgress(progress: TranscriptionProgress): void {
+    set((state) => ({
+      transcriptionProgress: { ...state.transcriptionProgress, [progress.meetingId]: progress },
+    }));
+  }
+
+  function clearProgress(meetingId: string): void {
+    set((state) => {
+      if (!(meetingId in state.transcriptionProgress)) return state;
+      const { [meetingId]: _finished, ...rest } = state.transcriptionProgress;
+      return { transcriptionProgress: rest };
+    });
+  }
+
+  function startDesktopEvents(): void {
+    if (desktopEventsStarted) return;
+    desktopEventsStarted = true;
+    void desktop.onSpeechModels(storeSpeechModels);
+    void desktop.onTranscriptionProgress(storeProgress);
+  }
+
+  /** Learns voices for people who were labelled before the models were ready. */
+  async function enrollPendingPeople(): Promise<void> {
+    // No profile row means an upgrader whose labelled people never enrolled.
+    const pending = get().people
+      .filter((person) => person.voiceProfile === null || person.voiceProfile.status === "pending_sample")
+      .map((person) => person.id);
+    if (pending.length === 0) return;
+    queueVoiceLearning(pending);
+    const learned: string[] = [];
+    const needsSpeech: string[] = [];
+    // Serialized on purpose: each enrollment reads meeting audio and runs a model.
+    for (const personId of pending) {
+      try {
+        const assigned = await desktop.findVoiceEnrollmentSegment(personId);
+        if (assigned) await enrollFromAssignment(assigned.meetingId, assigned.speakerLabel, personId);
+      } catch (error) {
+        showError(error);
+      } finally {
+        finishVoiceLearning(personId);
+      }
+      const profile = get().people.find((candidate) => candidate.id === personId)?.voiceProfile;
+      if (profile?.status === "ready") learned.push(personId);
+      else if (profile?.status === "failed") reportVoiceOutcome(personId);
+      else if (profile?.lastError) needsSpeech.push(personId);
+    }
+    if (learned.length === 0 && needsSpeech.length === 0) return;
+    const parts = [];
+    if (learned.length > 0) parts.push(`Learned ${learned.length === 1 ? `${personName(learned[0])}'s voice` : `${learned.length} voices`}.`);
+    if (needsSpeech.length > 0) {
+      const names = needsSpeech.map(personName).join(", ");
+      parts.push(`${names} ${needsSpeech.length === 1 ? "needs" : "need"} more labelled speech to be recognised.`);
+    }
+    showNotice(parts.join(" "));
+  }
+
+  async function transcribe(meetingId: string): Promise<boolean> {
+    set((state) => ({
+      meetings: state.meetings.map((meeting) => meeting.id === meetingId
+        ? { ...meeting, status: "processing", errorMessage: null }
+        : meeting),
+    }));
+    try {
+      storeMeeting(await desktop.transcribeMeeting(meetingId));
+      return true;
+    } catch (error) {
+      showError(error);
+      // The desktop marks the meeting failed with this same message.
+      const message = error instanceof Error ? error.message : String(error);
+      set((state) => ({
+        meetings: state.meetings.map((meeting) => meeting.id === meetingId
+          ? { ...meeting, status: "failed", errorMessage: message }
+          : meeting),
+      }));
+      return false;
+    } finally {
+      clearProgress(meetingId);
+      if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
+    }
+  }
+
   async function run<T>(action: () => Promise<T>): Promise<T | null> {
     set({ busy: true });
     try {
@@ -194,12 +327,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     const state = get();
     const person = state.people.find((candidate) => candidate.id === personId);
     if (!person
-      || !state.settings.pyannoteApiKeyConfigured
+      || state.speechModels?.state !== "ready"
       || person.voiceProfile?.status === "ready"
       || person.voiceProfile?.status === "learning"
       || person.voiceProfile?.status === "disabled"
       || enrollmentInFlight.has(personId)) return;
     enrollmentInFlight.add(personId);
+    queueVoiceLearning([personId]);
     try {
       const person = await desktop.enrollVoiceProfile(meetingId, speakerLabel, personId);
       storePerson(person);
@@ -207,6 +341,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       showError(error);
     } finally {
       enrollmentInFlight.delete(personId);
+      finishVoiceLearning(personId);
     }
   }
 
@@ -242,7 +377,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     const moving = meetings.find((meeting) => meeting.id === meetingId);
     if (!moving) return currentPlacements();
     const groupKey = (projectId: string | null, folderId: string | null) =>
-      `${projectId ?? "__unsorted__"} ${folderId ?? "__root__"}`;
+      `${projectId ?? "__unsorted__"}\u0000${folderId ?? "__root__"}`;
     const sourceGroup = meetings.filter(
       (meeting) => meeting.projectId === moving.projectId && meeting.folderId === moving.folderId,
     );
@@ -319,14 +454,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   }
 
   async function resumeInterruptedTranscriptions(meetingIds: string[]): Promise<void> {
-    for (const meetingId of meetingIds) {
-      try {
-        storeMeeting(await desktop.transcribeMeeting(meetingId));
-        if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
-      } catch (error) {
-        showError(error);
-      }
-    }
+    // The desktop queues these itself; starting them together shows each as queued.
+    await Promise.all(meetingIds.map((meetingId) => transcribe(meetingId)));
   }
 
   return {
@@ -342,13 +471,21 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     chatLoading: false,
     chatBusy: false,
     toasts: [],
+    speechModels: null,
+    transcriptionProgress: {},
+    voiceLearning: [],
     canUndo: false,
     canRedo: false,
 
     async load() {
       set({ loading: true });
+      startDesktopEvents();
       try {
-        const snapshot = await desktop.loadWorkspace();
+        const [snapshot, speechModels, progress] = await Promise.all([
+          desktop.loadWorkspace(),
+          desktop.speechModelsStatus(),
+          desktop.transcriptionProgress(),
+        ]);
         const selectedMeetingId = snapshot.meetings[0]?.id ?? null;
         const segments = selectedMeetingId
           ? await desktop.loadMeetingSegments(selectedMeetingId)
@@ -359,26 +496,20 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           segmentsLoading: false,
           selectedMeetingId,
           selectedProjectId: snapshot.meetings[0]?.projectId ?? null,
+          speechModels,
+          transcriptionProgress: Object.fromEntries(progress.map((entry) => [entry.meetingId, entry])),
         });
-        if (snapshot.settings.pyannoteApiKeyConfigured) {
-          // Serialized on purpose: each retry may decode and upload meeting audio.
-          void (async () => {
-            for (const person of snapshot.people) {
-              const status = person.voiceProfile?.status;
-              // No profile row means an upgrader whose labeled people never enrolled.
-              if (status !== undefined && status !== "pending_sample") continue;
-              await enrollBestAvailableAssignment(person.id);
-            }
-          })();
-        }
+        if (speechModels.state === "ready") void enrollPendingPeople();
         const selected = snapshot.meetings[0];
         if (selected?.status === "failed" && selected.errorMessage) {
           showError(selected.errorMessage);
         }
         if (!recoveryStarted) {
           recoveryStarted = true;
+          // A job still in the progress map survived a window reload and is running.
           const interruptedMeetingIds = snapshot.meetings
             .filter((meeting) => meeting.status === "processing" && meeting.durationMs > 0)
+            .filter((meeting) => !progress.some((entry) => entry.meetingId === meeting.id))
             .map((meeting) => meeting.id);
           if (interruptedMeetingIds.length > 0) {
             void resumeInterruptedTranscriptions(interruptedMeetingIds);
@@ -679,6 +810,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
             if (profile?.status !== "ready" && profile?.status !== "learning") {
               await enrollFromAssignment(meetingId, speakerLabel, personId);
             }
+            reportVoiceOutcome(personId);
           })();
         }
         return true;
@@ -772,25 +904,34 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       return result === true;
     },
 
-    async setPyannoteApiKey(apiKey) {
+    async downloadSpeechModels() {
+      try {
+        storeSpeechModels(await desktop.downloadSpeechModels());
+        return get().speechModels?.state === "ready";
+      } catch (error) {
+        showError(error);
+        try {
+          storeSpeechModels(await desktop.speechModelsStatus());
+        } catch {
+          // The toast already explains the failure.
+        }
+        return false;
+      }
+    },
+
+    async cancelSpeechModelsDownload() {
+      try {
+        await desktop.cancelSpeechModelsDownload();
+      } catch (error) {
+        showError(error);
+      }
+    },
+
+    async removeSpeechModels() {
       const result = await run(async () => {
-        const configured = await desktop.setPyannoteApiKey(apiKey);
-        set((state) => ({
-          settings: { ...state.settings, pyannoteApiKeyConfigured: configured },
-        }));
+        storeSpeechModels(await desktop.removeSpeechModels());
         return true;
       });
-      if (result === true && apiKey.trim()) {
-        // Detached so saving the key resolves immediately; serialized because
-        // each retry may decode and upload meeting audio.
-        void (async () => {
-          for (const person of get().people) {
-            const status = person.voiceProfile?.status;
-            if (status === "ready" || status === "learning" || status === "disabled") continue;
-            await enrollBestAvailableAssignment(person.id);
-          }
-        })();
-      }
       return result === true;
     },
 
@@ -818,20 +959,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         return true;
       });
       if (!stopped) return false;
-      if (!get().settings.pyannoteApiKeyConfigured) return true;
-
-      set((state) => ({
-        meetings: state.meetings.map((meeting) => meeting.id === meetingId
-          ? { ...meeting, status: "processing", errorMessage: null }
-          : meeting),
-      }));
-      try {
-        storeMeeting(await desktop.transcribeMeeting(meetingId));
-      } catch (error) {
-        showError(error);
-      } finally {
-        if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
-      }
+      if (!speechReady()) return true;
+      void transcribe(meetingId);
       return true;
     },
 
@@ -848,18 +977,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       return desktop.recordingLevels(meetingId);
     },
 
-    async transcribeMeeting(meetingId) {
-      set({ busy: true });
-      try {
-        storeMeeting(await desktop.transcribeMeeting(meetingId));
-        if (get().selectedMeetingId === meetingId) await loadSegmentsForMeeting(meetingId);
-        return true;
-      } catch (error) {
-        showError(error);
-        return false;
-      } finally {
-        set({ busy: false });
-      }
+    transcribeMeeting(meetingId) {
+      return transcribe(meetingId);
     },
 
     async loadSegmentAudio(meetingId, startMs, endMs) {

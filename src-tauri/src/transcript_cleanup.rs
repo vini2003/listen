@@ -85,13 +85,15 @@ pub async fn refine_transcript(
     api_key: &str,
     context: &CleanupContext,
     segments: &[TranscriptSegment],
+    progress: &(dyn Fn(f32) + Sync),
 ) -> AppResult<Vec<TranscriptSegment>> {
     if segments.is_empty() {
         return Ok(Vec::new());
     }
 
     let batches = segment_batches(segments);
-    let results = stream::iter(batches.into_iter().enumerate().map(|(index, batch)| {
+    let total = batches.len();
+    let mut pending = stream::iter(batches.into_iter().enumerate().map(|(index, batch)| {
         let client = client.clone();
         let api_key = api_key.to_string();
         let context = context.clone();
@@ -101,13 +103,12 @@ pub async fn refine_transcript(
             Ok::<_, AppError>((index, refined))
         }
     }))
-    .buffer_unordered(MAX_PARALLEL_REQUESTS)
-    .collect::<Vec<_>>()
-    .await;
+    .buffer_unordered(MAX_PARALLEL_REQUESTS);
 
-    let mut completed = Vec::with_capacity(results.len());
-    for result in results {
+    let mut completed = Vec::with_capacity(total);
+    while let Some(result) = pending.next().await {
         completed.push(result?);
+        progress(completed.len() as f32 / total as f32);
     }
     completed.sort_by_key(|(index, _)| *index);
 

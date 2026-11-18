@@ -9,7 +9,7 @@ export type TranscriptStateKind =
   | "recording"
   | "processing"
   | "failed"
-  | "awaiting-key"
+  | "awaiting-models"
   | "ready-to-transcribe"
   | "empty";
 
@@ -18,14 +18,14 @@ export function transcriptStateFor(input: {
   durationMs: number;
   hasTranscript: boolean;
   segmentsLoading: boolean;
-  pyannoteKeyConfigured: boolean;
+  speechModelsReady: boolean;
 }): TranscriptStateKind {
   if (input.hasTranscript) return "transcript";
   if (input.segmentsLoading) return "loading";
   if (input.status === "recording") return "recording";
   if (input.status === "processing") return "processing";
   if (input.status === "failed") return "failed";
-  if (input.durationMs > 0) return input.pyannoteKeyConfigured ? "ready-to-transcribe" : "awaiting-key";
+  if (input.durationMs > 0) return input.speechModelsReady ? "ready-to-transcribe" : "awaiting-models";
   return "empty";
 }
 

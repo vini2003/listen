@@ -57,7 +57,7 @@ describe("transcriptStateFor", () => {
     durationMs: 10_000,
     hasTranscript: false,
     segmentsLoading: false,
-    pyannoteKeyConfigured: true,
+    speechModelsReady: true,
   };
 
   it("always renders an existing transcript", () => {
@@ -75,9 +75,9 @@ describe("transcriptStateFor", () => {
     expect(transcriptStateFor({ ...base, status: "failed" })).toBe("failed");
   });
 
-  it("gates transcription on the pyannote key", () => {
+  it("gates transcription on the speech models", () => {
     expect(transcriptStateFor(base)).toBe("ready-to-transcribe");
-    expect(transcriptStateFor({ ...base, pyannoteKeyConfigured: false })).toBe("awaiting-key");
+    expect(transcriptStateFor({ ...base, speechModelsReady: false })).toBe("awaiting-models");
   });
 
   it("prompts to record when no audio exists", () => {

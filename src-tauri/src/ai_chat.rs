@@ -490,7 +490,7 @@ mod tests {
         let segment = TranscriptSegment {
             id: "segment".to_string(),
             meeting_id: meeting.id.clone(),
-            speaker_label: "precision:A".to_string(),
+            speaker_label: "voice:1".to_string(),
             person_id: Some(person.id.clone()),
             identity_source: Some("local_microphone".to_string()),
             identity_confidence: Some(100.0),

@@ -154,7 +154,7 @@ export default function App() {
         onCreateProject={() => setCreateProjectOpen(true)}
         onCreateMeeting={openCreateMeeting}
         onOpenPeople={openPeople}
-        onOpenSettings={() => openSettings()}
+        onOpenSettings={openSettings}
       />
 
       <div className="workspace-main">

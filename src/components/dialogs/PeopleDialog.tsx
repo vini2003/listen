@@ -150,7 +150,9 @@ function voiceProfileDescription(person: Person): string {
     return `Learned from ${profile.enrollmentClipCount ?? 1} clean clip${profile.enrollmentClipCount === 1 ? "" : "s"}${seconds ? ` (${seconds}s)` : ""}.`;
   }
   if (profile?.status === "learning") return "Creating a private profile from assigned speech.";
-  if (profile?.status === "pending_sample") return "Assign this person to enough clean speech to learn their voice.";
+  if (profile?.status === "pending_sample") return profile.lastError?.startsWith("Relearning")
+    ? "Relearning this voice on this computer from speech already labelled as this person."
+    : "Assign this person to enough clean speech to learn their voice.";
   if (profile?.status === "failed") return profile.lastError || "The last enrollment could not be completed.";
   if (profile?.status === "disabled") return "The stored voice profile was erased and no new one will be learned.";
   return "Learned automatically the first time you label this person in a transcript.";

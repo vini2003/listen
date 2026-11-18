@@ -16,7 +16,7 @@ export function EmptyState({ onCreateProject, onCreateMeeting }: EmptyStateProps
         <button className="primary-button" onClick={onCreateMeeting}><Mic size={17} /> Start recording</button>
         <button className="secondary-button" onClick={onCreateProject}><FolderPlus size={17} /> Create project</button>
       </div>
-      <div className="welcome-note"><span /> Audio stays on this device until you choose to transcribe it.</div>
+      <div className="welcome-note"><span /> Recording, transcription and voice recognition all happen on this computer.</div>
     </motion.main>
   );
 }

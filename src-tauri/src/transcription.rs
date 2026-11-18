@@ -1,33 +1,82 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    path::PathBuf,
-    time::Duration,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
     credentials,
     database::Database,
-    domain::{AppSettings, Meeting, TranscriptSegment},
+    domain::{AppSettings, TranscriptSegment},
     error::{AppError, AppResult},
-    pyannote::{
-        self, IdentificationSpan, KnownVoiceprint, PyannoteClient, TranscriptionTurn,
-        VoiceprintMatch,
-    },
+    speech::{self, Stage, Voice, Voiceprint},
     speech_audio,
+    speech_models::SpeechModels,
     transcript_cleanup::{self, CleanupContext},
     voice_profile_store::VoiceProfileStore,
     voice_reference,
 };
 
-const MAX_PYANNOTE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
-const MIN_IDENTITY_CONFIDENCE: f64 = 72.0;
-const MIN_IDENTITY_MARGIN: f64 = 12.0;
-const MIN_CLUSTER_ALIGNMENT: f64 = 0.60;
+/// Calibrated on four labelled team meetings with two to fifteen speakers:
+/// the same person in different recordings scored 0.83–0.93, different people
+/// at most 0.39. A match also has to beat the runner-up clearly.
+const MIN_IDENTITY_SIMILARITY: f32 = 0.6;
+const MIN_IDENTITY_MARGIN: f32 = 0.1;
+/// Voices with less solo speech than this are too uncertain to name.
+const MIN_IDENTITY_CLEAN_MS: i64 = 3_000;
 const MIN_LOCAL_MICROPHONE_RMS: f64 = 140.0;
 const MIN_LOCAL_MICROPHONE_DOMINANCE: f64 = 2.5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Phase {
+    Queued,
+    Preparing,
+    Separating,
+    Transcribing,
+    Identifying,
+    Polishing,
+}
+
+impl Phase {
+    /// Share of the whole job each phase ends at, from measured run times.
+    fn span(self) -> (f32, f32) {
+        match self {
+            Phase::Queued => (0.0, 0.0),
+            Phase::Preparing => (0.0, 0.04),
+            Phase::Separating => (0.04, 0.32),
+            Phase::Transcribing => (0.32, 0.88),
+            Phase::Identifying => (0.88, 0.94),
+            Phase::Polishing => (0.94, 1.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionProgress {
+    pub meeting_id: String,
+    pub phase: Phase,
+    /// Whole-job progress from 0 to 1.
+    pub progress: f32,
+}
+
+impl TranscriptionProgress {
+    pub fn new(meeting_id: &str, phase: Phase, fraction: f32) -> Self {
+        let (start, end) = phase.span();
+        Self {
+            meeting_id: meeting_id.to_string(),
+            phase,
+            progress: start + (end - start) * fraction.clamp(0.0, 1.0),
+        }
+    }
+}
+
+pub type ProgressSink = Arc<dyn Fn(Phase, f32) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct IdentityDecisionReport {
@@ -41,249 +90,171 @@ pub struct IdentityDecisionReport {
 pub struct TranscriptionReport {
     pub cleanup_error: Option<String>,
     pub identification_error: Option<String>,
-    pub warning: Option<String>,
     pub active_sources: Vec<String>,
-    pub minimum_speakers: Option<u8>,
-    pub detected_speakers: Vec<String>,
-    pub transcribed_speakers: Vec<String>,
+    pub speaker_count: usize,
+    pub merged_labels: Vec<f32>,
+    pub audio_ms: i64,
+    pub elapsed: Duration,
     pub identity_candidates: usize,
     pub identity_decisions: Vec<IdentityDecisionReport>,
+}
+
+struct Candidate {
+    person_id: String,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct AcceptedIdentity {
+    person_id: String,
+    similarity: f32,
 }
 
 pub async fn transcribe_meeting(
     database: &Database,
     voice_profiles: &VoiceProfileStore,
+    models: &SpeechModels,
     meeting_id: &str,
+    progress: ProgressSink,
 ) -> AppResult<TranscriptionReport> {
+    let started = Instant::now();
     let meeting = database.meeting(meeting_id)?;
     let audio_directory = meeting
         .audio_directory
         .as_deref()
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Validation("This meeting has no saved audio".to_string()))?;
-    let api_key = credentials::pyannote_key().map_err(|_| {
-        AppError::Validation("Add a pyannote API key in Settings before transcribing".to_string())
-    })?;
-    let client = PyannoteClient::new(api_key)?;
-    let active_sources = speech_audio::active_capture_sources(&audio_directory)?;
-    let minimum_speakers = (active_sources.iter().any(|source| source == "microphone")
-        && active_sources.iter().any(|source| source == "system"))
-    .then_some(2);
+    let model_paths = models.paths()?;
 
-    let upload_path = std::env::temp_dir().join(format!(
-        "listen-precision-upload-{}.wav",
-        Uuid::new_v4().simple()
-    ));
-    let duration_ms = match speech_audio::write_mixed_recording(&audio_directory, &upload_path) {
-        Ok(duration_ms) => duration_ms,
-        Err(error) => {
-            let _ = fs::remove_file(&upload_path);
-            return Err(error);
-        }
-    };
-    if duration_ms <= 0 {
-        let _ = fs::remove_file(&upload_path);
+    progress(Phase::Preparing, 0.0);
+    let directory = audio_directory.clone();
+    let pipeline_progress = progress.clone();
+    let (active_sources, transcript) = tauri::async_runtime::spawn_blocking(move || {
+        let wav =
+            speech_audio::export_mixed_recording_with_progress(&directory, &mut |fraction| {
+                pipeline_progress(Phase::Preparing, fraction * 0.9)
+            })?;
+        let active_sources = speech_audio::active_capture_sources(&directory)?;
+        pipeline_progress(Phase::Preparing, 1.0);
+        let transcript = speech::transcribe(&wav, &model_paths, &mut |stage, fraction| {
+            let phase = match stage {
+                Stage::Separating => Phase::Separating,
+                Stage::Transcribing => Phase::Transcribing,
+                Stage::Identifying => Phase::Identifying,
+            };
+            pipeline_progress(phase, fraction);
+        })?;
+        Ok::<_, AppError>((active_sources, transcript))
+    })
+    .await
+    .map_err(|error| AppError::Speech(format!("The speech worker stopped: {error}")))??;
+    if transcript.turns.is_empty() {
         return Err(AppError::Validation(
-            "No recorded audio was found".to_string(),
+            "No speech was found in this recording".to_string(),
         ));
     }
-    let file_bytes = fs::metadata(&upload_path)?.len();
-    if file_bytes > MAX_PYANNOTE_FILE_BYTES {
-        let _ = fs::remove_file(&upload_path);
-        return Err(AppError::Pyannote(format!(
-            "file_too_large prepared_bytes={file_bytes} limit_bytes={MAX_PYANNOTE_FILE_BYTES}"
-        )));
-    }
-
-    let object_key = format!(
-        "listen/meetings/{meeting_id}/{}.wav",
-        Uuid::new_v4().simple()
-    );
-    let media_url = client.upload(&upload_path, &object_key).await;
-    let _ = fs::remove_file(&upload_path);
-    let media_url = media_url?;
 
     let people = database.people()?;
     let settings = database.settings()?;
-    // Likely-present people (this meeting/project + the microphone owner) get
-    // identification slots first; everyone else with a learned voiceprint fills
-    // the remaining slots, most recently matched first.
-    let priority_ids = priority_candidate_ids(database, &meeting, &settings)?;
-    let all_profiles = database.voice_profiles()?;
+    let profiles = database.voice_profiles()?;
     // "Label this person automatically" off also turns off local-microphone attribution.
     let local_speaker_disabled =
         settings
             .local_speaker_person_id
             .as_ref()
             .is_some_and(|person_id| {
-                all_profiles
+                profiles
                     .iter()
                     .any(|profile| &profile.person_id == person_id && profile.status == "disabled")
             });
-    let (priority_profiles, general_profiles): (Vec<_>, Vec<_>) = all_profiles
-        .into_iter()
-        .filter(|profile| profile.status == "ready")
-        .partition(|profile| priority_ids.contains(&profile.person_id));
-    let mut known_people = Vec::new();
-    let mut profile_storage_warnings = Vec::new();
-    for profile in priority_profiles.into_iter().chain(general_profiles) {
-        if known_people.len() >= 50 {
-            break;
-        }
+    let mut candidates = Vec::new();
+    let mut storage_warnings = Vec::new();
+    for profile in profiles.iter().filter(|profile| profile.status == "ready") {
         match voice_profiles.load(&profile.person_id) {
-            Ok(Some(voiceprint)) => known_people.push(KnownVoiceprint {
-                label: profile.person_id,
-                voiceprint,
-            }),
-            Ok(None) => {
-                if let Some(voiceprint) = profile.voiceprint {
-                    known_people.push(KnownVoiceprint {
-                        label: profile.person_id,
-                        voiceprint,
-                    });
-                } else {
-                    profile_storage_warnings.push(format!(
-                        "person={} encrypted profile is missing",
-                        profile.person_id
-                    ));
-                }
+            Ok(Some(stored)) => match Voiceprint::decode(&stored) {
+                Some(voiceprint) => candidates.push(Candidate {
+                    person_id: profile.person_id.clone(),
+                    embedding: voiceprint.embedding,
+                }),
+                None => storage_warnings.push(format!(
+                    "person={} voiceprint is from another model",
+                    profile.person_id
+                )),
+            },
+            Ok(None) => storage_warnings.push(format!(
+                "person={} encrypted profile is missing",
+                profile.person_id
+            )),
+            Err(error) => {
+                storage_warnings.push(format!("person={} detail={error}", profile.person_id))
             }
-            Err(error) => profile_storage_warnings
-                .push(format!("person={} detail={error}", profile.person_id)),
         }
     }
-
-    let (transcription, identification, mut identification_error) = if known_people.is_empty() {
-        (
-            client.transcribe(&media_url, minimum_speakers).await?,
-            None,
-            None,
-        )
-    } else {
-        let (transcription, identification) = tokio::join!(
-            client.transcribe(&media_url, minimum_speakers),
-            client.identify(&media_url, &known_people, minimum_speakers),
-        );
-        match identification {
-            Ok(identification) => (transcription?, Some(identification), None),
-            Err(error) => (transcription?, None, Some(error.to_string())),
-        }
-    };
-    if !profile_storage_warnings.is_empty() {
-        let storage_warning = format!(
-            "voice_profile_storage {}",
-            profile_storage_warnings.join("; ")
-        );
-        identification_error = Some(match identification_error {
-            Some(existing) => format!("{existing}; {storage_warning}"),
-            None => storage_warning,
-        });
-    }
-
-    if transcription.turn_level_transcription.is_empty() {
-        return Err(AppError::Pyannote(
-            "Precision-2 returned no transcribed speaker turns".to_string(),
-        ));
-    }
-    voice_reference::write_overlap_metadata(&audio_directory, &transcription.diarization)?;
-    let mut detected_speakers = transcription
-        .diarization
-        .iter()
-        .map(|span| span.speaker.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    detected_speakers.sort();
-    let mut transcribed_speakers = transcription
-        .turn_level_transcription
-        .iter()
-        .map(|turn| turn.speaker.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    transcribed_speakers.sort();
-
-    let existing_segments = database.segments_for_meeting(meeting_id)?;
     let valid_person_ids = people
         .iter()
         .map(|person| person.id.clone())
         .collect::<HashSet<_>>();
-    let (cluster_identities, mut identity_decisions) = identification
-        .as_ref()
-        .map(|output| {
-            reconcile_identity_clusters(
-                &transcription.turn_level_transcription,
-                &output.identification,
-                &output.voiceprints,
-                &valid_person_ids,
+    candidates.retain(|candidate| valid_person_ids.contains(&candidate.person_id));
+    let (identities, mut identity_decisions) = identify_voices(&transcript.voices, &candidates);
+    progress(Phase::Identifying, 1.0);
+
+    voice_reference::write_overlap_metadata(&audio_directory, &transcript.spans)?;
+    let existing_segments = database.segments_for_meeting(meeting_id)?;
+    let mut segments = Vec::with_capacity(transcript.turns.len());
+    for turn in &transcript.turns {
+        let manual_person =
+            person_from_manual_overlap(&existing_segments, turn.start_ms, turn.end_ms);
+        let local_person = if local_speaker_disabled || manual_person.is_some() {
+            None
+        } else {
+            local_microphone_person(
+                &audio_directory,
+                &settings,
+                &active_sources,
+                turn.start_ms,
+                turn.end_ms,
             )
-        })
-        .unwrap_or_default();
-    let mut segments = transcription
-        .turn_level_transcription
-        .iter()
-        .filter_map(|turn| {
-            let text = turn.text.trim();
-            if text.is_empty() {
-                return None;
-            }
-            let start_ms = seconds_to_ms(turn.start);
-            let end_ms = seconds_to_ms(turn.end).max(start_ms + 1);
-            let manual_person = person_from_manual_overlap(&existing_segments, start_ms, end_ms);
-            let local_person = if local_speaker_disabled {
-                None
-            } else {
-                local_microphone_person(
-                    &audio_directory,
-                    &settings,
-                    &active_sources,
-                    start_ms,
-                    end_ms,
-                )
-            };
-            let voice_identity = cluster_identities.get(&turn.speaker);
-            let (person_id, identity_source, identity_confidence) =
-                if let Some(person_id) = manual_person {
-                    (Some(person_id), Some("manual".to_string()), None)
-                } else if let Some(person_id) = local_person {
-                    (
-                        Some(person_id),
-                        Some("local_microphone".to_string()),
-                        Some(100.0),
-                    )
-                } else if let Some(identity) = voice_identity {
-                    (
-                        Some(identity.person_id.clone()),
-                        Some("voiceprint".to_string()),
-                        Some(identity.confidence),
-                    )
-                } else {
-                    (None, None, None)
-                };
-            Some(TranscriptSegment {
-                id: Uuid::new_v4().to_string(),
-                meeting_id: meeting_id.to_string(),
-                speaker_label: format!("precision:{}", turn.speaker),
-                person_id,
-                identity_source,
-                identity_confidence,
-                start_ms,
-                end_ms,
-                text: text.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    segments.sort_by_key(|segment| segment.start_ms);
+        };
+        let (person_id, identity_source, identity_confidence) = if let Some(person) = manual_person
+        {
+            (Some(person), Some("manual".to_string()), None)
+        } else if let Some(person) = local_person {
+            (
+                Some(person),
+                Some("local_microphone".to_string()),
+                Some(100.0),
+            )
+        } else if let Some(identity) = identities.get(&turn.speaker) {
+            (
+                Some(identity.person_id.clone()),
+                Some("voiceprint".to_string()),
+                Some(f64::from(identity.similarity) * 100.0),
+            )
+        } else {
+            (None, None, None)
+        };
+        segments.push(TranscriptSegment {
+            id: Uuid::new_v4().to_string(),
+            meeting_id: meeting_id.to_string(),
+            speaker_label: speaker_label(turn.speaker),
+            person_id,
+            identity_source,
+            identity_confidence,
+            start_ms: turn.start_ms,
+            end_ms: turn.end_ms,
+            text: turn.text.clone(),
+        });
+    }
     for decision in &mut identity_decisions {
         if segments.iter().any(|segment| {
-            segment.speaker_label == format!("precision:{}", decision.speaker)
+            segment.speaker_label == decision.speaker
                 && segment.identity_source.as_deref() == Some("local_microphone")
         }) {
             decision.reason = "local_microphone".to_string();
         }
     }
-    // People can be deleted while the paid transcription jobs run; a stale id
-    // would violate the person_id foreign key and roll back the whole insert.
+    // People can be deleted while the job runs; a stale id would violate the
+    // person_id foreign key and roll back the whole insert.
     let fresh_person_ids = database
         .people()?
         .into_iter()
@@ -302,53 +273,55 @@ pub async fn transcribe_meeting(
     }
     database.replace_segments(meeting_id, segments.clone())?;
 
-    let project_name = meeting.project_id.as_ref().and_then(|project_id| {
-        database
-            .projects()
-            .ok()?
-            .into_iter()
-            .find(|project| &project.id == project_id)
-            .map(|project| project.name)
-    });
-    let cleanup_context = CleanupContext {
-        meeting_id: meeting_id.to_string(),
-        meeting_title: meeting.title,
-        project_name,
-        people,
-    };
-    let cleanup_error = optional_cleanup(database, &cleanup_context, &segments).await;
-    let mut warning = transcription
-        .warning
-        .filter(|warning| !warning.trim().is_empty());
-    if minimum_speakers.is_some_and(|minimum| detected_speakers.len() < minimum as usize) {
-        let count_warning = format!(
-            "Precision-2 returned {} speaker(s) despite a minimum of {} inferred from active capture tracks",
-            detected_speakers.len(),
-            minimum_speakers.unwrap_or_default()
-        );
-        warning = Some(match warning {
-            Some(existing) => format!("{existing}; {count_warning}"),
-            None => count_warning,
+    let cleanup_error = if credentials::has_openai_key().unwrap_or(false) {
+        progress(Phase::Polishing, 0.0);
+        let project_name = meeting.project_id.as_ref().and_then(|project_id| {
+            database
+                .projects()
+                .ok()?
+                .into_iter()
+                .find(|project| &project.id == project_id)
+                .map(|project| project.name)
         });
-    }
+        let context = CleanupContext {
+            meeting_id: meeting_id.to_string(),
+            meeting_title: meeting.title,
+            project_name,
+            people,
+        };
+        let polishing = progress.clone();
+        optional_cleanup(database, &context, &segments, &move |fraction| {
+            polishing(Phase::Polishing, fraction)
+        })
+        .await
+    } else {
+        None
+    };
+    progress(Phase::Polishing, 1.0);
 
     Ok(TranscriptionReport {
         cleanup_error,
-        identification_error,
-        warning,
+        identification_error: (!storage_warnings.is_empty())
+            .then(|| format!("voice_profile_storage {}", storage_warnings.join("; "))),
         active_sources,
-        minimum_speakers,
-        detected_speakers,
-        transcribed_speakers,
-        identity_candidates: known_people.len(),
+        speaker_count: transcript.voices.len(),
+        merged_labels: transcript.merges,
+        audio_ms: transcript.duration_ms,
+        elapsed: started.elapsed(),
+        identity_candidates: candidates.len(),
         identity_decisions,
     })
+}
+
+pub fn speaker_label(speaker: usize) -> String {
+    format!("voice:{}", speaker + 1)
 }
 
 async fn optional_cleanup(
     database: &Database,
     context: &CleanupContext,
     segments: &[TranscriptSegment],
+    progress: &(dyn Fn(f32) + Sync),
 ) -> Option<String> {
     let api_key = credentials::openai_key().ok()?;
     let client = match reqwest::Client::builder()
@@ -358,7 +331,9 @@ async fn optional_cleanup(
         Ok(client) => client,
         Err(error) => return Some(format!("Could not prepare transcript cleanup: {error}")),
     };
-    match transcript_cleanup::refine_transcript(&client, &api_key, context, segments).await {
+    match transcript_cleanup::refine_transcript(&client, &api_key, context, segments, progress)
+        .await
+    {
         Ok(refined) => database
             .update_segment_texts(&context.meeting_id, &refined)
             .err()
@@ -367,155 +342,103 @@ async fn optional_cleanup(
     }
 }
 
-#[derive(Debug, Clone)]
-struct AcceptedIdentity {
-    person_id: String,
-    confidence: f64,
-}
-
-fn priority_candidate_ids(
-    database: &Database,
-    meeting: &Meeting,
-    settings: &AppSettings,
-) -> AppResult<HashSet<String>> {
-    let mut candidates = HashSet::new();
-    if let Some(person_id) = settings.local_speaker_person_id.as_ref() {
-        candidates.insert(person_id.clone());
-    }
-
-    let related_meeting_ids = database
-        .meetings()?
-        .into_iter()
-        .filter(|candidate| {
-            candidate.id == meeting.id
-                || meeting.project_id.is_some() && candidate.project_id == meeting.project_id
-        })
-        .map(|candidate| candidate.id)
-        .collect::<HashSet<_>>();
-    for related_meeting_id in related_meeting_ids {
-        for segment in database.segments_for_meeting(&related_meeting_id)? {
-            if let Some(person_id) = segment.person_id {
-                candidates.insert(person_id);
-            }
-        }
-    }
-    Ok(candidates)
-}
-
-fn reconcile_identity_clusters(
-    transcription: &[TranscriptionTurn],
-    identification: &[IdentificationSpan],
-    voiceprints: &[VoiceprintMatch],
-    valid_person_ids: &HashSet<String>,
+/// Names each detected voice after the saved person it clearly sounds like.
+/// One person per voice and one voice per person, strongest match first.
+fn identify_voices(
+    voices: &[Voice],
+    candidates: &[Candidate],
 ) -> (
-    HashMap<String, AcceptedIdentity>,
+    HashMap<usize, AcceptedIdentity>,
     Vec<IdentityDecisionReport>,
 ) {
-    let mut accepted_by_identification_cluster = HashMap::new();
-    let mut score_by_identification_cluster = HashMap::new();
-
-    for result in voiceprints {
-        let mut scores = result
-            .confidence
-            .iter()
-            .filter(|(person_id, _)| valid_person_ids.contains(*person_id))
-            .map(|(person_id, score)| (person_id.as_str(), *score))
-            .collect::<Vec<_>>();
-        scores.sort_by(|left, right| right.1.total_cmp(&left.1));
-        let Some((best_person, best_score)) = scores.first().copied() else {
-            continue;
-        };
-        let second_score = scores.get(1).map(|(_, score)| *score).unwrap_or(0.0);
-        let margin = best_score - second_score;
-        score_by_identification_cluster.insert(
-            result.speaker.clone(),
-            (best_person.to_string(), best_score, margin),
-        );
-        if result.r#match.as_deref() == Some(best_person)
-            && best_score >= MIN_IDENTITY_CONFIDENCE
-            && margin >= MIN_IDENTITY_MARGIN
-        {
-            accepted_by_identification_cluster.insert(
-                result.speaker.clone(),
-                AcceptedIdentity {
-                    person_id: best_person.to_string(),
-                    confidence: best_score,
-                },
-            );
-        }
+    struct Scored<'a> {
+        speaker: usize,
+        best: Option<(&'a str, f32)>,
+        margin: f32,
+        reason: &'static str,
     }
 
-    let mut identities = HashMap::new();
-    let mut reports = Vec::new();
-    let transcription_speakers = transcription
+    let mut scored = voices
         .iter()
-        .map(|turn| turn.speaker.as_str())
-        .collect::<HashSet<_>>();
-    for speaker in transcription_speakers {
-        let speaker_turns = transcription.iter().filter(|turn| turn.speaker == speaker);
-        let mut total_ms = 0i64;
-        let mut overlap_by_cluster = HashMap::<&str, i64>::new();
-        for turn in speaker_turns {
-            let start_ms = seconds_to_ms(turn.start);
-            let end_ms = seconds_to_ms(turn.end);
-            total_ms += (end_ms - start_ms).max(0);
-            for span in identification {
-                let Some(cluster) = span.diarization_speaker.as_deref() else {
-                    continue;
-                };
-                let overlap = overlap_ms(
-                    start_ms,
-                    end_ms,
-                    seconds_to_ms(span.start),
-                    seconds_to_ms(span.end),
-                );
-                if overlap > 0 {
-                    *overlap_by_cluster.entry(cluster).or_default() += overlap;
+        .map(|voice| {
+            let mut scores = voice
+                .embedding
+                .as_ref()
+                .filter(|_| voice.clean_ms >= MIN_IDENTITY_CLEAN_MS)
+                .map(|embedding| {
+                    candidates
+                        .iter()
+                        .map(|candidate| {
+                            (
+                                candidate.person_id.as_str(),
+                                speech::cosine_similarity(embedding, &candidate.embedding),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            scores.sort_by(|left, right| right.1.total_cmp(&left.1));
+            let best = scores.first().copied();
+            let margin = match (best, scores.get(1)) {
+                (Some((_, first)), Some((_, second))) => first - second,
+                (Some((_, first)), None) => first,
+                _ => 0.0,
+            };
+            let reason = if voice.embedding.is_none() || voice.clean_ms < MIN_IDENTITY_CLEAN_MS {
+                "too_little_solo_speech"
+            } else if best.is_none() {
+                "no_saved_voices"
+            } else if best.is_some_and(|(_, score)| score < MIN_IDENTITY_SIMILARITY) {
+                "below_threshold"
+            } else if margin < MIN_IDENTITY_MARGIN {
+                "ambiguous"
+            } else {
+                "accepted"
+            };
+            Scored {
+                speaker: voice.speaker,
+                best,
+                margin,
+                reason,
+            }
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        let score = |entry: &Scored| entry.best.map(|(_, score)| score).unwrap_or(f32::MIN);
+        score(right).total_cmp(&score(left))
+    });
+
+    let mut identities = HashMap::new();
+    let mut taken = HashSet::new();
+    let mut reports = Vec::with_capacity(scored.len());
+    for entry in scored {
+        let mut reason = entry.reason;
+        if reason == "accepted" {
+            if let Some((person_id, similarity)) = entry.best {
+                if taken.insert(person_id) {
+                    identities.insert(
+                        entry.speaker,
+                        AcceptedIdentity {
+                            person_id: person_id.to_string(),
+                            similarity,
+                        },
+                    );
+                } else {
+                    reason = "person_already_matched";
                 }
             }
         }
-
-        let aligned = overlap_by_cluster
-            .into_iter()
-            .max_by_key(|(_, overlap)| *overlap)
-            .filter(|(_, overlap)| {
-                total_ms > 0 && *overlap as f64 / total_ms as f64 >= MIN_CLUSTER_ALIGNMENT
-            });
-        let Some((identification_cluster, _)) = aligned else {
-            reports.push(IdentityDecisionReport {
-                speaker: speaker.to_string(),
-                person_id: None,
-                confidence: None,
-                margin: None,
-                reason: "cluster_alignment_low".to_string(),
-            });
-            continue;
-        };
-        let scores = score_by_identification_cluster.get(identification_cluster);
-        if let Some(identity) = accepted_by_identification_cluster.get(identification_cluster) {
-            identities.insert(speaker.to_string(), identity.clone());
-            reports.push(IdentityDecisionReport {
-                speaker: speaker.to_string(),
-                person_id: Some(identity.person_id.clone()),
-                confidence: Some(identity.confidence),
-                margin: scores.map(|(_, _, margin)| *margin),
-                reason: "accepted".to_string(),
-            });
-        } else {
-            reports.push(IdentityDecisionReport {
-                speaker: speaker.to_string(),
-                person_id: None,
-                confidence: scores.map(|(_, score, _)| *score),
-                margin: scores.map(|(_, _, margin)| *margin),
-                reason: if scores.is_some() {
-                    "below_threshold"
-                } else {
-                    "no_candidate_score"
-                }
-                .to_string(),
-            });
-        }
+        reports.push(IdentityDecisionReport {
+            speaker: speaker_label(entry.speaker),
+            person_id: (reason == "accepted")
+                .then(|| entry.best.map(|(person_id, _)| person_id.to_string()))
+                .flatten(),
+            confidence: entry.best.map(|(_, score)| f64::from(score) * 100.0),
+            margin: entry.best.map(|_| f64::from(entry.margin) * 100.0),
+            reason: reason.to_string(),
+        });
     }
+    reports.sort_by(|left, right| left.speaker.cmp(&right.speaker));
     (identities, reports)
 }
 
@@ -540,7 +463,7 @@ fn person_from_manual_overlap(
 }
 
 fn local_microphone_person(
-    audio_directory: &std::path::Path,
+    audio_directory: &Path,
     settings: &AppSettings,
     active_sources: &[String],
     start_ms: i64,
@@ -573,80 +496,100 @@ fn overlap_ms(left_start: i64, left_end: i64, right_start: i64, right_end: i64) 
     left_end.min(right_end) - left_start.max(right_start)
 }
 
-fn seconds_to_ms(seconds: f64) -> i64 {
-    (seconds * 1_000.0).round() as i64
-}
-
-pub fn failure_summary(error: &AppError) -> (&'static str, &'static str) {
-    if matches!(error, AppError::Pyannote(_))
-        || error.to_string().to_ascii_lowercase().contains("pyannote")
-    {
-        return pyannote::failure_summary(error);
-    }
-    if matches!(error, AppError::Audio(_) | AppError::Io(_)) {
-        return (
+/// A short category for the log and a message the person can act on.
+pub fn failure_summary(error: &AppError) -> (&'static str, String) {
+    match error {
+        AppError::Validation(message) => ("validation", message.clone()),
+        AppError::Speech(_) => (
+            "speech_model",
+            "The speech models could not process this recording. Open the log for details."
+                .to_string(),
+        ),
+        AppError::Audio(_) | AppError::Io(_) => (
             "local_audio",
-            "Listen could not prepare the saved recording. Open the log for details.",
-        );
+            "Listen could not read the saved recording. Open the log for details.".to_string(),
+        ),
+        _ => (
+            "unexpected",
+            "Listen could not create this transcript. Open the log for the exact reason."
+                .to_string(),
+        ),
     }
-    (
-        "unexpected",
-        "Listen could not create this transcript. Open the log for the exact reason.",
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn maps_confident_identity_by_time_across_request_local_clusters() {
-        let turns = vec![TranscriptionTurn {
-            speaker: "SPEAKER_00".to_string(),
-            start: 10.0,
-            end: 15.0,
-            text: "Hello".to_string(),
-        }];
-        let spans = vec![IdentificationSpan {
-            start: 10.2,
-            end: 14.9,
-            diarization_speaker: Some("SPEAKER_17".to_string()),
-        }];
-        let matches = vec![VoiceprintMatch {
-            speaker: "SPEAKER_17".to_string(),
-            r#match: Some("nestor".to_string()),
-            confidence: HashMap::from([("nestor".to_string(), 91.0), ("freddy".to_string(), 12.0)]),
-        }];
-        let valid = HashSet::from(["nestor".to_string(), "freddy".to_string()]);
+    fn voice(speaker: usize, embedding: Vec<f32>) -> Voice {
+        Voice {
+            speaker,
+            speech_ms: 60_000,
+            clean_ms: 30_000,
+            embedding: Some(embedding),
+        }
+    }
 
-        let (identities, reports) = reconcile_identity_clusters(&turns, &spans, &matches, &valid);
-        assert_eq!(identities["SPEAKER_00"].person_id, "nestor");
-        assert_eq!(reports[0].reason, "accepted");
+    fn candidate(person_id: &str, embedding: Vec<f32>) -> Candidate {
+        Candidate {
+            person_id: person_id.to_string(),
+            embedding,
+        }
     }
 
     #[test]
-    fn rejects_low_confidence_or_ambiguous_voiceprints() {
-        let turns = vec![TranscriptionTurn {
-            speaker: "SPEAKER_00".to_string(),
-            start: 10.0,
-            end: 20.0,
-            text: "Hello".to_string(),
-        }];
-        let spans = vec![IdentificationSpan {
-            start: 10.0,
-            end: 20.0,
-            diarization_speaker: Some("SPEAKER_04".to_string()),
-        }];
-        let matches = vec![VoiceprintMatch {
-            speaker: "SPEAKER_04".to_string(),
-            r#match: Some("nestor".to_string()),
-            confidence: HashMap::from([("nestor".to_string(), 76.0), ("freddy".to_string(), 70.0)]),
-        }];
-        let valid = HashSet::from(["nestor".to_string(), "freddy".to_string()]);
+    fn names_clear_matches_and_leaves_uncertain_voices_unknown() {
+        let voices = vec![
+            voice(0, vec![1.0, 0.0, 0.0]),
+            voice(1, vec![0.0, 1.0, 0.0]),
+            voice(2, vec![0.0, -1.0, 0.0]),
+        ];
+        let candidates = vec![
+            candidate("nestor", vec![0.95, 0.1, 0.0]),
+            candidate("freddy", vec![0.1, 0.7, 0.7]),
+            candidate("amy", vec![0.0, 0.75, 0.66]),
+        ];
+        let (identities, reports) = identify_voices(&voices, &candidates);
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[&0].person_id, "nestor");
+        assert_eq!(reports[0].reason, "accepted");
+        assert_eq!(reports[1].reason, "ambiguous", "0.75 against 0.70");
+        assert_eq!(reports[2].reason, "below_threshold");
+    }
 
-        let (identities, reports) = reconcile_identity_clusters(&turns, &spans, &matches, &valid);
+    #[test]
+    fn one_person_per_voice_strongest_first() {
+        let voices = vec![voice(0, vec![0.8, 0.6]), voice(1, vec![1.0, 0.0])];
+        let candidates = vec![candidate("nestor", vec![1.0, 0.0])];
+        let (identities, reports) = identify_voices(&voices, &candidates);
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[&1].person_id, "nestor");
+        assert_eq!(reports[0].reason, "person_already_matched");
+    }
+
+    #[test]
+    fn short_voices_are_never_named() {
+        let mut short = voice(0, vec![1.0, 0.0]);
+        short.clean_ms = 1_000;
+        let (identities, reports) =
+            identify_voices(&[short], &[candidate("nestor", vec![1.0, 0.0])]);
         assert!(identities.is_empty());
-        assert_eq!(reports[0].reason, "below_threshold");
+        assert_eq!(reports[0].reason, "too_little_solo_speech");
+    }
+
+    #[test]
+    fn progress_spans_cover_the_whole_job() {
+        assert_eq!(
+            TranscriptionProgress::new("m", Phase::Preparing, 0.0).progress,
+            0.0
+        );
+        assert!(
+            (TranscriptionProgress::new("m", Phase::Transcribing, 0.5).progress - 0.6).abs() < 1e-6
+        );
+        assert_eq!(
+            TranscriptionProgress::new("m", Phase::Polishing, 1.0).progress,
+            1.0
+        );
     }
 
     #[test]
@@ -654,7 +597,7 @@ mod tests {
         let manual = TranscriptSegment {
             id: "one".to_string(),
             meeting_id: "meeting".to_string(),
-            speaker_label: "precision:A".to_string(),
+            speaker_label: "voice:1".to_string(),
             person_id: Some("vini".to_string()),
             identity_source: Some("manual".to_string()),
             identity_confidence: None,

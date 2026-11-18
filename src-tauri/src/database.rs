@@ -21,6 +21,9 @@ const PERSON_COLORS: [&str; 6] = [
 const MAX_CHAT_MESSAGE_CHARACTERS: usize = 12_000;
 const MAX_AVATAR_EDGE: u32 = 256;
 
+/// Marks voiceprints made on this device by the WeSpeaker model.
+pub const LOCAL_VOICE_PROVIDER: &str = "local-wespeaker";
+
 #[derive(Clone)]
 pub struct Database {
     path: PathBuf,
@@ -97,7 +100,7 @@ impl Database {
 
             CREATE TABLE IF NOT EXISTS voice_profiles (
                 person_id TEXT PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
-                provider TEXT NOT NULL DEFAULT 'pyannote',
+                provider TEXT NOT NULL DEFAULT 'local-wespeaker',
                 voiceprint TEXT,
                 status TEXT NOT NULL,
                 consent_confirmed_at TEXT,
@@ -149,7 +152,6 @@ impl Database {
         self.ensure_transcript_identity_columns()?;
         self.ensure_meeting_organization_columns()?;
         self.ensure_person_photo_columns()?;
-        self.migrate_legacy_voice_profiles()?;
         Ok(())
     }
 
@@ -227,40 +229,6 @@ impl Database {
                 [],
             )?;
         }
-        Ok(())
-    }
-
-    fn migrate_legacy_voice_profiles(&self) -> AppResult<()> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let legacy = {
-            let mut statement = transaction.prepare(
-                "SELECT id, reference_audio_data_url FROM people WHERE reference_audio_data_url LIKE 'pyannote:%'",
-            )?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        let now = Utc::now().to_rfc3339();
-        for (person_id, encoded) in legacy {
-            let Some(voiceprint) = legacy_voiceprint(&encoded) else {
-                continue;
-            };
-            transaction.execute(
-                "INSERT OR IGNORE INTO voice_profiles(
-                    person_id, provider, voiceprint, status, created_at, updated_at
-                 ) VALUES(?1, 'pyannote', ?2, 'ready', ?3, ?3)",
-                params![person_id, voiceprint, now],
-            )?;
-            transaction.execute(
-                "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
-                [person_id],
-            )?;
-        }
-        transaction.commit()?;
         Ok(())
     }
 
@@ -851,15 +819,14 @@ impl Database {
     pub fn voice_profiles(&self) -> AppResult<Vec<StoredVoiceProfile>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT person_id, voiceprint, status
+            "SELECT person_id, status
              FROM voice_profiles
              ORDER BY updated_at DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(StoredVoiceProfile {
                 person_id: row.get(0)?,
-                voiceprint: row.get(1)?,
-                status: row.get(2)?,
+                status: row.get(1)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -872,9 +839,9 @@ impl Database {
         self.connection()?
             .execute(
                 "INSERT INTO voice_profiles(person_id, provider, status, created_at, updated_at)
-                 VALUES(?1, 'pyannote', 'pending_sample', ?2, ?2)
+                 VALUES(?1, ?2, 'pending_sample', ?3, ?3)
                  ON CONFLICT(person_id) DO NOTHING",
-                params![person_id, now],
+                params![person_id, LOCAL_VOICE_PROVIDER, now],
             )
             .map_err(|error| match error {
                 rusqlite::Error::SqliteFailure(inner, _)
@@ -894,17 +861,14 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         connection.execute(
             "INSERT INTO voice_profiles(person_id, provider, status, created_at, updated_at)
-             VALUES(?1, 'pyannote', 'disabled', ?2, ?2)
+             VALUES(?1, ?3, 'disabled', ?2, ?2)
              ON CONFLICT(person_id) DO UPDATE SET
-                status = 'disabled', voiceprint = NULL, enrollment_meeting_id = NULL,
+                status = 'disabled', provider = excluded.provider, voiceprint = NULL,
+                enrollment_meeting_id = NULL,
                 enrollment_speaker_label = NULL, enrollment_duration_ms = NULL,
                 enrollment_clip_count = NULL, source = NULL, last_error = NULL,
                 updated_at = excluded.updated_at",
-            params![person_id, now],
-        )?;
-        connection.execute(
-            "UPDATE people SET reference_audio_data_url = NULL WHERE id = ?1",
-            [person_id],
+            params![person_id, now, LOCAL_VOICE_PROVIDER],
         )?;
         Ok(())
     }
@@ -962,7 +926,7 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         if self.connection()?.execute(
             "UPDATE voice_profiles SET
-                voiceprint = NULL, status = 'ready', enrollment_meeting_id = ?1,
+                provider = ?8, voiceprint = NULL, status = 'ready', enrollment_meeting_id = ?1,
                 enrollment_speaker_label = ?2, enrollment_duration_ms = ?3,
                 enrollment_clip_count = ?4, source = ?5, last_error = NULL, updated_at = ?6
              WHERE person_id = ?7 AND status != 'disabled'",
@@ -973,7 +937,8 @@ impl Database {
                 clip_count,
                 source,
                 now,
-                person_id
+                person_id,
+                LOCAL_VOICE_PROVIDER
             ],
         )? != 1
         {
@@ -984,21 +949,38 @@ impl Database {
         Ok(())
     }
 
-    pub fn clear_voiceprint_blob(&self, person_id: &str) -> AppResult<()> {
-        self.connection()?.execute(
-            "UPDATE voice_profiles SET voiceprint = NULL WHERE person_id = ?1",
-            [person_id],
+    /// Voiceprints made by another model (the hosted pyannote service that
+    /// older versions used) cannot be compared with local ones. Their profiles
+    /// go back to waiting for a sample, so the next pass relearns them on this
+    /// device from the person's labelled speech. Returns the people affected.
+    pub fn retire_foreign_voice_profiles(&self) -> AppResult<Vec<String>> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let person_ids = {
+            let mut statement =
+                transaction.prepare("SELECT person_id FROM voice_profiles WHERE provider != ?1")?;
+            let rows = statement
+                .query_map([LOCAL_VOICE_PROVIDER], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE voice_profiles
+             SET status = CASE WHEN status = 'disabled' THEN 'disabled' ELSE 'pending_sample' END,
+                 last_error = CASE WHEN status = 'disabled' THEN NULL
+                     ELSE 'Relearning this voice on this device' END,
+                 provider = ?1, voiceprint = NULL, updated_at = ?2
+             WHERE provider != ?1",
+            params![LOCAL_VOICE_PROVIDER, now],
         )?;
-        Ok(())
-    }
-
-    pub fn activate_existing_voice_profile(&self, person_id: &str) -> AppResult<()> {
-        self.connection()?.execute(
-            "UPDATE voice_profiles SET status = 'ready', last_error = NULL, updated_at = ?1
-             WHERE person_id = ?2 AND status != 'disabled'",
-            params![Utc::now().to_rfc3339(), person_id],
+        transaction.execute(
+            "UPDATE people SET reference_audio_data_url = NULL
+             WHERE reference_audio_data_url IS NOT NULL",
+            [],
         )?;
-        Ok(())
+        transaction.commit()?;
+        Ok(person_ids)
     }
 
     pub fn recover_interrupted_voice_profiles(&self) -> AppResult<()> {
@@ -1503,21 +1485,6 @@ fn thumbnail_photo_data_url(data_url: &str) -> Option<String> {
     Some(format!("data:image/webp;base64,{}", BASE64.encode(output)))
 }
 
-fn legacy_voiceprint(value: &str) -> Option<String> {
-    if let Some(encoded) = value.strip_prefix("pyannote:v1:") {
-        return serde_json::from_str::<serde_json::Value>(encoded)
-            .ok()?
-            .get("voiceprint")?
-            .as_str()
-            .filter(|voiceprint| !voiceprint.trim().is_empty())
-            .map(ToOwned::to_owned);
-    }
-    value
-        .strip_prefix("pyannote:")
-        .filter(|voiceprint| !voiceprint.trim().is_empty())
-        .map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1955,14 +1922,7 @@ mod tests {
             "pending_sample"
         );
         database
-            .save_voice_profile(
-                &vinicius.id,
-                "meeting",
-                "precision:SPEAKER_00",
-                18_000,
-                3,
-                "microphone",
-            )
+            .save_voice_profile(&vinicius.id, "meeting", "voice:1", 18_000, 3, "microphone")
             .expect("save voice profile");
 
         let people = database.people().expect("people");
@@ -2010,32 +1970,57 @@ mod tests {
     }
 
     #[test]
-    fn legacy_voiceprint_rows_migrate_as_ready() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let database = Database::open(directory.path().to_path_buf()).expect("database");
-        let person = database
+    fn foreign_voiceprints_are_retired_for_local_relearning() {
+        let (_directory, database) = database();
+        let ready = database
             .create_person(PersonDraft {
-                full_name: "Legacy".to_string(),
+                full_name: "Ready".to_string(),
                 nickname: None,
                 photo_data_url: None,
             })
-            .expect("person");
+            .expect("ready person");
+        let disabled = database
+            .create_person(PersonDraft {
+                full_name: "Disabled".to_string(),
+                nickname: None,
+                photo_data_url: None,
+            })
+            .expect("disabled person");
+        database
+            .mark_voice_profile_learning(&ready.id)
+            .expect("learning");
+        database
+            .save_voice_profile(&ready.id, "meeting", "voice:1", 12_000, 2, "microphone")
+            .expect("save");
+        database
+            .disable_voice_profile(&disabled.id)
+            .expect("disable");
         database
             .connection()
             .expect("connection")
-            .execute(
-                "UPDATE people SET reference_audio_data_url = 'pyannote:print' WHERE id = ?1",
-                [&person.id],
-            )
-            .expect("seed legacy voiceprint");
+            .execute("UPDATE voice_profiles SET provider = 'pyannote'", [])
+            .expect("simulate an older install");
 
-        drop(database);
-        let database = Database::open(directory.path().to_path_buf()).expect("reopen");
+        let mut retired = database.retire_foreign_voice_profiles().expect("retire");
+        retired.sort();
+        let mut expected = vec![ready.id.clone(), disabled.id.clone()];
+        expected.sort();
+        assert_eq!(retired, expected);
+
         let people = database.people().expect("people");
-        assert_eq!(
-            people[0].voice_profile.as_ref().expect("profile").status,
-            "ready"
-        );
+        let status = |id: &str| {
+            people
+                .iter()
+                .find(|person| person.id == id)
+                .and_then(|person| person.voice_profile.as_ref())
+                .map(|profile| profile.status.clone())
+        };
+        assert_eq!(status(&ready.id).as_deref(), Some("pending_sample"));
+        assert_eq!(status(&disabled.id).as_deref(), Some("disabled"));
+        assert!(database
+            .retire_foreign_voice_profiles()
+            .expect("second pass")
+            .is_empty());
     }
 
     #[test]

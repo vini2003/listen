@@ -4,13 +4,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     database::Database,
     domain::TranscriptSegment,
     error::{AppError, AppResult},
-    pyannote::{PyannoteClient, SpeakerSpan},
+    speech::{SpeakerEmbedder, SpeakerSpan, Voiceprint},
     speech_audio,
 };
 
@@ -20,11 +19,11 @@ const MIN_CLIP_MS: i64 = 1_500;
 const MIN_SIGNAL_RMS: f64 = 140.0;
 const MIN_SOURCE_DOMINANCE: f64 = 1.65;
 const OVERLAP_TOLERANCE_MS: i64 = 200;
-const METADATA_FILENAME: &str = "precision-overlaps.json";
+const METADATA_FILENAME: &str = "speaker-overlaps.json";
 
 #[derive(Debug)]
 pub struct LearnedVoiceprint {
-    pub voiceprint: String,
+    pub voiceprint: Voiceprint,
     pub source: String,
     pub duration_ms: i64,
     pub clip_count: i64,
@@ -51,16 +50,18 @@ struct ClipCandidate {
 
 struct ReferenceCandidate {
     source: &'static str,
-    samples: Vec<i16>,
+    clips: Vec<Vec<i16>>,
     duration_ms: i64,
     clip_count: i64,
     rms: f64,
     dominance: f64,
 }
 
-pub async fn learn_from_assignment(
+/// Learns a voiceprint from a manually labelled speaker. Runs on a blocking
+/// thread: it reads clips from disk and runs the voice matching model.
+pub fn learn_from_assignment(
     database: &Database,
-    client: &PyannoteClient,
+    embedder_model: &Path,
     meeting_id: &str,
     speaker_label: &str,
     person_id: &str,
@@ -71,12 +72,12 @@ pub async fn learn_from_assignment(
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Validation("This recording has no saved audio".to_string()))?;
     let speaker_segments = database.speaker_segments(meeting_id, speaker_label)?;
-    // Check before the paid upload/voiceprint calls; a rapid reassignment or
-    // undo should not cost an API round-trip. Re-checked after the calls too.
-    if !speaker_segments
-        .iter()
-        .any(|segment| segment.person_id.as_deref() == Some(person_id))
-    {
+    let still_assigned = |segments: &[TranscriptSegment]| {
+        segments
+            .iter()
+            .any(|segment| segment.person_id.as_deref() == Some(person_id))
+    };
+    if !still_assigned(&speaker_segments) {
         return Err(AppError::Validation(
             "The speaker assignment changed before voice learning started".to_string(),
         ));
@@ -90,33 +91,31 @@ pub async fn learn_from_assignment(
         &excluded_ranges,
     )?;
 
-    let reference_path =
-        std::env::temp_dir().join(format!("listen-voiceprint-{}.wav", Uuid::new_v4()));
-    speech_audio::write_normalized_wav(&reference_path, &candidate.samples)?;
-    let object_key = format!(
-        "listen/voiceprints/{person_id}/{}.wav",
-        Uuid::new_v4().simple()
-    );
-    let result = async {
-        let media_url = client.upload(&reference_path, &object_key).await?;
-        let voiceprint = client.create_voiceprint(&media_url).await?;
-        let assignment_is_current = database
-            .speaker_segments(meeting_id, speaker_label)?
-            .iter()
-            .any(|segment| segment.person_id.as_deref() == Some(person_id));
-        if !assignment_is_current {
-            return Err(AppError::Validation(
-                "The speaker assignment changed before voice learning finished".to_string(),
-            ));
+    let mut embedder = SpeakerEmbedder::load(embedder_model)?;
+    let mut embeddings = Vec::with_capacity(candidate.clips.len());
+    for clip in &candidate.clips {
+        if let Some(embedding) = embedder.embed(clip)? {
+            embeddings.push((embedding, clip.len() as f32));
         }
-        Ok::<_, AppError>(voiceprint)
     }
-    .await;
-    let _ = fs::remove_file(&reference_path);
-    let voiceprint = result?;
+    let embedding = crate::speech::centroid(
+        embeddings
+            .iter()
+            .map(|(embedding, weight)| (embedding.as_slice(), *weight)),
+    )
+    .ok_or_else(|| {
+        AppError::Validation(
+            "The labelled speech was too short or too quiet to learn this voice".to_string(),
+        )
+    })?;
 
+    if !still_assigned(&database.speaker_segments(meeting_id, speaker_label)?) {
+        return Err(AppError::Validation(
+            "The speaker assignment changed before voice learning finished".to_string(),
+        ));
+    }
     Ok(LearnedVoiceprint {
-        voiceprint,
+        voiceprint: Voiceprint::new(embedding),
         source: candidate.source.to_string(),
         duration_ms: candidate.duration_ms,
         clip_count: candidate.clip_count,
@@ -132,8 +131,8 @@ pub fn write_overlap_metadata(directory: &Path, spans: &[SpeakerSpan]) -> AppRes
             if left.speaker == right.speaker {
                 continue;
             }
-            let start_ms = seconds_to_ms(left.start.max(right.start));
-            let end_ms = seconds_to_ms(left.end.min(right.end));
+            let start_ms = left.start_ms.max(right.start_ms);
+            let end_ms = left.end_ms.min(right.end_ms);
             if end_ms - start_ms > OVERLAP_TOLERANCE_MS {
                 overlaps.push(TimeRange { start_ms, end_ms });
             }
@@ -238,7 +237,7 @@ fn combine_clips(clips: &[ClipCandidate], source: &'static str) -> Option<Refere
         .filter(|clip| clip.source == source)
         .collect::<Vec<_>>();
     selected.sort_by(|left, right| right.score.total_cmp(&left.score));
-    let mut samples = Vec::new();
+    let mut clips = Vec::new();
     let mut duration_ms = 0i64;
     let mut weighted_rms = 0.0;
     let mut weighted_dominance = 0.0;
@@ -255,7 +254,7 @@ fn combine_clips(clips: &[ClipCandidate], source: &'static str) -> Option<Refere
         } else {
             (clip.samples.len() as i64 * used_ms / clip_duration_ms) as usize
         };
-        samples.extend_from_slice(&clip.samples[..sample_count]);
+        clips.push(clip.samples[..sample_count].to_vec());
         duration_ms += used_ms;
         weighted_rms += clip.rms * used_ms as f64;
         weighted_dominance += clip.dominance * used_ms as f64;
@@ -263,7 +262,7 @@ fn combine_clips(clips: &[ClipCandidate], source: &'static str) -> Option<Refere
     }
     (duration_ms > 0).then(|| ReferenceCandidate {
         source,
-        samples,
+        clips,
         duration_ms,
         clip_count,
         rms: weighted_rms / duration_ms as f64,
@@ -291,10 +290,6 @@ fn overlap_ms(left_start: i64, left_end: i64, right_start: i64, right_end: i64) 
     left_end.min(right_end) - left_start.max(right_start)
 }
 
-fn seconds_to_ms(seconds: f64) -> i64 {
-    (seconds * 1_000.0).round() as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,14 +299,14 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let spans = vec![
             SpeakerSpan {
-                speaker: "A".to_string(),
-                start: 1.0,
-                end: 4.0,
+                speaker: 0,
+                start_ms: 1_000,
+                end_ms: 4_000,
             },
             SpeakerSpan {
-                speaker: "B".to_string(),
-                start: 2.0,
-                end: 3.0,
+                speaker: 1,
+                start_ms: 2_000,
+                end_ms: 3_000,
             },
         ];
 
@@ -348,6 +343,11 @@ mod tests {
         let combined = combine_clips(&clips, "microphone").expect("combined clips");
         assert_eq!(combined.duration_ms, 12_000);
         assert_eq!(combined.clip_count, 2);
-        assert_eq!(combined.samples.len(), 192_000);
+        assert_eq!(combined.clips.len(), 2);
+        assert_eq!(combined.clips.iter().map(Vec::len).sum::<usize>(), 192_000);
+        assert_eq!(
+            combined.clips[0][0], 2,
+            "the higher-scoring clip comes first"
+        );
     }
 }

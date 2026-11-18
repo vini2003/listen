@@ -1,15 +1,17 @@
 import { useEventCallback } from "../../hooks/useEventCallback";
 import { useShallow } from "zustand/react/shallow";
-import { Check, ChevronDown, Copy, KeyRound, LoaderCircle, Mic2, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
+import { Check, ChevronDown, Copy, Download, LoaderCircle, Mic2, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
+import { formatBytes, isDownloading, phaseLabel } from "../../lib/speechModels";
 import { focusFirstMenuItem, moveMenuFocus } from "../../lib/focus";
 import type { MeetingPlayback } from "../../hooks/useMeetingPlayback";
 import { mergeSequentialSegments, transcriptStateFor, type TranscriptTurn } from "../../lib/transcript";
 import { useWorkspace } from "../../store/workspace";
 import type { SettingsSection } from "../dialogs/SettingsDialog";
+import { DownloadProgress, ProgressBar } from "../speech/SpeechModelsPanel";
 import { Avatar } from "../ui/Avatar";
 
 interface TranscriptProps {
@@ -24,7 +26,8 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     segments,
     people,
     assignSpeaker,
-    settings,
+    speechModels,
+    progress,
     transcribeMeeting,
     busy,
     segmentsLoading,
@@ -34,7 +37,8 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     segments: state.segments,
     people: state.people,
     assignSpeaker: state.assignSpeaker,
-    settings: state.settings,
+    speechModels: state.speechModels,
+    progress: state.transcriptionProgress[meeting.id] ?? null,
     transcribeMeeting: state.transcribeMeeting,
     busy: state.busy,
     segmentsLoading: state.segmentsLoading,
@@ -62,7 +66,8 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
   const meetingTurns = useMemo(() => mergeSequentialSegments(meetingSegments), [meetingSegments]);
   const recording = meeting.status === "recording";
   const processing = meeting.status === "processing";
-  const canTranscribe = meeting.durationMs > 0 && settings.pyannoteApiKeyConfigured && !recording && !processing;
+  const modelsReady = speechModels?.state === "ready";
+  const canTranscribe = meeting.durationMs > 0 && modelsReady && !recording && !processing;
   const hasTranscript = meetingSegments.length > 0;
 
   useEffect(() => {
@@ -147,7 +152,8 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     durationMs: meeting.durationMs,
     hasTranscript,
     segmentsLoading,
-    pyannoteKeyConfigured: settings.pyannoteApiKeyConfigured,
+    // Until the desktop reports, assume ready so the download prompt never flashes.
+    speechModelsReady: speechModels === null || modelsReady,
   });
 
   if (transcriptState === "loading") {
@@ -169,11 +175,14 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
   }
 
   if (transcriptState === "processing") {
+    const fraction = progress?.progress ?? 0;
     return (
-      <div className="transcript-state">
+      <div className="transcript-state processing-state">
         <span className="processing-orbit"><Sparkles size={22} /></span>
         <h3>Building transcript</h3>
-        <p>Precision-2 is separating voices and transcribing the saved audio.</p>
+        <p>{progress ? phaseLabel(progress.phase) : "Starting"}{progress && progress.phase !== "queued" ? ` · ${Math.floor(fraction * 100)}%` : "…"}</p>
+        <ProgressBar fraction={fraction} label="Transcription progress" />
+        <small className="processing-note">Runs on this computer. You can keep working meanwhile.</small>
       </div>
     );
   }
@@ -187,16 +196,30 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
         {meeting.errorMessage ? (
           <div className="transcript-notice warning-notice"><span>{meeting.errorMessage}</span></div>
         ) : null}
-        {settings.pyannoteApiKeyConfigured ? (
+        {modelsReady ? (
           <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>
             <Sparkles size={16} /> Try again
           </button>
-        ) : null}
+        ) : (
+          <ModelsDownloadPrompt meetingId={meeting.id} />
+        )}
       </div>
     );
   }
 
-  if (transcriptState === "awaiting-key" || transcriptState === "ready-to-transcribe" || transcriptState === "empty") {
+  if (transcriptState === "awaiting-models") {
+    return (
+      <div className="transcript-state">
+        <span><Download size={22} /></span>
+        <h3>Set up transcription</h3>
+        <p>Listen transcribes and recognises voices on this computer, so recordings never leave it. A one-time download of {formatBytes(speechModels?.totalBytes ?? 0)} gets it ready.</p>
+        <ModelsDownloadPrompt meetingId={meeting.id} />
+        <button className="text-link-button" type="button" onClick={() => onOpenSettings("transcription")}>What gets downloaded?</button>
+      </div>
+    );
+  }
+
+  if (transcriptState === "ready-to-transcribe" || transcriptState === "empty") {
     return (
       <div className="transcript-state">
         <span><Sparkles size={22} /></span>
@@ -204,18 +227,11 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
         <p>
           {transcriptState === "empty"
             ? "Press the microphone below. Recording continues until you stop."
-            : transcriptState === "ready-to-transcribe"
-              ? "Create a transcript with Precision-2 speaker labels."
-              : "Add a pyannote API key to create the transcript."}
+            : "Create a transcript with speakers separated and recognised, right on this computer."}
         </p>
         {transcriptState === "ready-to-transcribe" && canTranscribe ? (
           <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>
             <Sparkles size={16} /> Transcribe
-          </button>
-        ) : null}
-        {transcriptState === "awaiting-key" ? (
-          <button className="primary-button" onClick={() => onOpenSettings("transcription")}>
-            <KeyRound size={16} /> Add API key
           </button>
         ) : null}
       </div>
@@ -227,7 +243,7 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
       {meeting.status === "failed" ? (
         <div className="transcript-notice warning-notice">
           <span>{meeting.errorMessage || "The last transcription attempt failed."}</span>
-          {settings.pyannoteApiKeyConfigured ? (
+          {modelsReady ? (
             <button disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>Try again</button>
           ) : null}
         </div>
@@ -252,6 +268,32 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
         />
       ))}
     </div>
+  );
+}
+
+/** Download button that becomes a live progress bar, then transcribes this meeting. */
+function ModelsDownloadPrompt({ meetingId }: { meetingId: string }) {
+  const { speechModels, downloadSpeechModels, cancelSpeechModelsDownload, transcribeMeeting } = useWorkspace(useShallow((state) => ({
+    speechModels: state.speechModels,
+    downloadSpeechModels: state.downloadSpeechModels,
+    cancelSpeechModelsDownload: state.cancelSpeechModelsDownload,
+    transcribeMeeting: state.transcribeMeeting,
+  })));
+  if (!speechModels) return null;
+  if (isDownloading(speechModels)) {
+    return <div className="inline-download"><DownloadProgress onCancel={() => void cancelSpeechModelsDownload()} /></div>;
+  }
+  return (
+    <>
+      {speechModels.error ? <div className="transcript-notice warning-notice"><span>{speechModels.error}</span></div> : null}
+      <button
+        className="primary-button"
+        type="button"
+        onClick={() => void downloadSpeechModels().then((ready) => { if (ready) void transcribeMeeting(meetingId); })}
+      >
+        <Download size={16} /> {speechModels.downloadedBytes > 0 ? "Resume download and transcribe" : "Download and transcribe"}
+      </button>
+    </>
   );
 }
 
@@ -380,7 +422,7 @@ const TranscriptRow = memo(function TranscriptRow({ segment, people, anonymousNa
 
 function autoIdentityTitle(segment: TranscriptSegment): string {
   if (segment.identitySource === "local_microphone") return "Labeled automatically from your microphone";
-  const confidence = segment.identityConfidence ? ` · ${Math.round(segment.identityConfidence)}% confident` : "";
+  const confidence = segment.identityConfidence ? ` · ${Math.round(segment.identityConfidence)}% voice match` : "";
   return `Labeled automatically by voice match${confidence}`;
 }
 

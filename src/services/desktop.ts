@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type {
   AssistantContext,
   AppSettings,
@@ -14,6 +15,9 @@ import type {
   Project,
   ProjectDraft,
   RecordingLevels,
+  SpeechModelsStatus,
+  TranscriptionPhase,
+  TranscriptionProgress,
   TranscriptSegment,
   TranscriptSegmentBackup,
   WorkspaceSnapshot,
@@ -59,7 +63,13 @@ export interface DesktopService {
   enrollVoiceProfile(meetingId: string, speakerLabel: string, personId: string): Promise<Person>;
   updateSettings(settings: AppSettings): Promise<AppSettings>;
   setApiKey(apiKey: string): Promise<boolean>;
-  setPyannoteApiKey(apiKey: string): Promise<boolean>;
+  speechModelsStatus(): Promise<SpeechModelsStatus>;
+  downloadSpeechModels(): Promise<SpeechModelsStatus>;
+  cancelSpeechModelsDownload(): Promise<void>;
+  removeSpeechModels(): Promise<SpeechModelsStatus>;
+  transcriptionProgress(): Promise<TranscriptionProgress[]>;
+  onSpeechModels(handler: (status: SpeechModelsStatus) => void): Promise<() => void>;
+  onTranscriptionProgress(handler: (progress: TranscriptionProgress) => void): Promise<() => void>;
   openDiagnostics(): Promise<void>;
   startRecording(request: RecordingRequest): Promise<Meeting>;
   stopRecording(meetingId: string): Promise<Meeting>;
@@ -107,7 +117,15 @@ const tauriService: DesktopService = {
     invoke("enroll_voice_profile", { meetingId, speakerLabel, personId }),
   updateSettings: (settings) => invoke("update_settings", { settings }),
   setApiKey: (apiKey) => invoke("set_api_key", { apiKey }),
-  setPyannoteApiKey: (apiKey) => invoke("set_pyannote_api_key", { apiKey }),
+  speechModelsStatus: () => invoke("speech_models_status"),
+  downloadSpeechModels: () => invoke("download_speech_models"),
+  cancelSpeechModelsDownload: () => invoke("cancel_speech_models_download"),
+  removeSpeechModels: () => invoke("remove_speech_models"),
+  transcriptionProgress: () => invoke("transcription_progress"),
+  onSpeechModels: (handler) =>
+    listen<SpeechModelsStatus>("listen://speech-models", (event) => handler(event.payload)),
+  onTranscriptionProgress: (handler) =>
+    listen<TranscriptionProgress>("listen://transcription-progress", (event) => handler(event.payload)),
   openDiagnostics: () => invoke("open_diagnostics"),
   startRecording: (request) => invoke("start_recording", { request }),
   stopRecording: (meetingId) => invoke("stop_recording", { meetingId }),
@@ -138,6 +156,18 @@ function createBrowserPreviewService(): DesktopService {
   let activeTimer: number | null = null;
   let activeStartedAt: number | null = null;
   let chatMessages = readPreviewChats();
+  let speechModels = previewSpeechModels(localStorage.getItem("listen-browser-preview-models-v1") === "ready");
+  let downloadTimer: number | null = null;
+  const speechModelListeners = new Set<(status: SpeechModelsStatus) => void>();
+  const progressListeners = new Set<(progress: TranscriptionProgress) => void>();
+  const activeProgress = new Map<string, TranscriptionProgress>();
+
+  function publishSpeechModels(next: SpeechModelsStatus): SpeechModelsStatus {
+    speechModels = next;
+    localStorage.setItem("listen-browser-preview-models-v1", next.state === "ready" ? "ready" : "missing");
+    speechModelListeners.forEach((listener) => listener(structuredClone(next)));
+    return structuredClone(next);
+  }
   const deletedMeetings = new Map<string, { meeting: Meeting; segments: WorkspaceSnapshot["segments"] }>();
 
   function persist(): void {
@@ -405,6 +435,7 @@ function createBrowserPreviewService(): DesktopService {
       if (person.voiceProfile?.status === "disabled") {
         throw new Error("Automatic voice labeling is turned off for this person");
       }
+      await new Promise((resolve) => window.setTimeout(resolve, 2_500));
       person.voiceProfile = {
         status: "ready",
         enrollmentDurationMs: 12_000,
@@ -426,10 +457,46 @@ function createBrowserPreviewService(): DesktopService {
       persist();
       return snapshot.settings.apiKeyConfigured;
     },
-    async setPyannoteApiKey(apiKey) {
-      snapshot.settings.pyannoteApiKeyConfigured = apiKey.trim().length > 0;
-      persist();
-      return snapshot.settings.pyannoteApiKeyConfigured;
+    async speechModelsStatus() {
+      return structuredClone(speechModels);
+    },
+    async downloadSpeechModels() {
+      if (speechModels.state === "ready" || downloadTimer !== null) return structuredClone(speechModels);
+      publishSpeechModels({ ...speechModels, state: "downloading", downloadedBytes: 0, error: null });
+      await new Promise<void>((resolve) => {
+        downloadTimer = window.setInterval(() => {
+          const downloadedBytes = Math.min(speechModels.totalBytes, speechModels.downloadedBytes + speechModels.totalBytes / 40);
+          if (downloadedBytes >= speechModels.totalBytes) {
+            if (downloadTimer !== null) window.clearInterval(downloadTimer);
+            downloadTimer = null;
+            publishSpeechModels(previewSpeechModels(true));
+            resolve();
+            return;
+          }
+          publishSpeechModels({ ...speechModels, downloadedBytes });
+        }, 120);
+      });
+      return structuredClone(speechModels);
+    },
+    async cancelSpeechModelsDownload() {
+      if (downloadTimer === null) return;
+      window.clearInterval(downloadTimer);
+      downloadTimer = null;
+      publishSpeechModels({ ...previewSpeechModels(false), downloadedBytes: speechModels.downloadedBytes });
+    },
+    async removeSpeechModels() {
+      return publishSpeechModels(previewSpeechModels(false));
+    },
+    async transcriptionProgress() {
+      return [...activeProgress.values()].map((progress) => structuredClone(progress));
+    },
+    async onSpeechModels(handler) {
+      speechModelListeners.add(handler);
+      return () => speechModelListeners.delete(handler);
+    },
+    async onTranscriptionProgress(handler) {
+      progressListeners.add(handler);
+      return () => progressListeners.delete(handler);
     },
     async openDiagnostics() {},
     async startRecording(request) {
@@ -466,8 +533,17 @@ function createBrowserPreviewService(): DesktopService {
       };
     },
     async transcribeMeeting(meetingId) {
-      mutateMeeting(meetingId, { status: "processing" });
-      await new Promise((resolve) => window.setTimeout(resolve, 900));
+      if (speechModels.state !== "ready") throw new Error("Download the speech models in Settings before transcribing");
+      mutateMeeting(meetingId, { status: "processing", errorMessage: null });
+      const phases: TranscriptionPhase[] = ["preparing", "separating", "transcribing", "identifying", "polishing"];
+      for (let step = 0; step <= 40; step += 1) {
+        const progress = step / 40;
+        const update = { meetingId, phase: phases[Math.min(phases.length - 1, Math.floor(progress * phases.length))], progress };
+        activeProgress.set(meetingId, update);
+        progressListeners.forEach((listener) => listener(update));
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+      }
+      activeProgress.delete(meetingId);
       return mutateMeeting(meetingId, { status: "ready" });
     },
     async loadSegmentAudio(_meetingId, startMs, endMs) {
@@ -554,6 +630,22 @@ function persistPreviewChats(messages: ChatMessage[]): void {
   localStorage.setItem("listen-browser-preview-chat-v1", JSON.stringify(messages));
 }
 
+function previewSpeechModels(installed: boolean): SpeechModelsStatus {
+  const models = [
+    { id: "nemotron-3-diarization", name: "Nemotron 3 Diarization", role: "Separates who is speaking", licence: "NVIDIA OpenMDW 1.1", sizeBytes: 402_170_175, installed },
+    { id: "parakeet-tdt-0.6b-v3-int8", name: "Parakeet TDT 0.6B v3", role: "Turns speech into text", licence: "CC BY 4.0", sizeBytes: 670_480_039, installed },
+    { id: "wespeaker-resnet34-lm", name: "WeSpeaker ResNet34-LM", role: "Recognises saved voices", licence: "CC BY 4.0", sizeBytes: 26_530_309, installed },
+  ];
+  const totalBytes = models.reduce((total, model) => total + model.sizeBytes, 0);
+  return {
+    state: installed ? "ready" : "missing",
+    downloadedBytes: installed ? totalBytes : 0,
+    totalBytes,
+    error: null,
+    models,
+  };
+}
+
 function makeMeeting(draft: MeetingDraft): Meeting {
   return {
     id: crypto.randomUUID(),
@@ -576,7 +668,7 @@ function readPreviewState(): WorkspaceSnapshot {
   if (saved) {
     const snapshot = JSON.parse(saved) as WorkspaceSnapshot;
     snapshot.folders ??= [];
-    snapshot.settings.pyannoteApiKeyConfigured ??= false;
+    delete (snapshot.settings as AppSettings & { pyannoteApiKeyConfigured?: boolean }).pyannoteApiKeyConfigured;
     snapshot.settings.localSpeakerPersonId ??= null;
     snapshot.settings.preferLocalSpeakerForMicrophone ??= true;
     snapshot.people.forEach((person) => {
@@ -718,7 +810,6 @@ function readPreviewState(): WorkspaceSnapshot {
       captureSystem: true,
       theme: "light",
       apiKeyConfigured: false,
-      pyannoteApiKeyConfigured: false,
       localSpeakerPersonId: null,
       preferLocalSpeakerForMicrophone: true,
     },

@@ -2,6 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, Fingerprint, LockKeyhole, MonitorSpeaker, Save, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useWorkspace } from "../../store/workspace";
+import { SpeechModelsPanel } from "../speech/SpeechModelsPanel";
 import { CustomSelect } from "../ui/CustomSelect";
 import { Modal } from "../ui/Modal";
 
@@ -14,26 +15,24 @@ interface SettingsDialogProps {
 }
 
 export function SettingsDialog({ open, onClose, initialSection }: SettingsDialogProps) {
-  const { settings, devices, people, updateSettings, eraseAllVoiceProfiles, setApiKey, setPyannoteApiKey, openDiagnostics, busy } = useWorkspace(useShallow((state) => ({
+  const { settings, devices, people, speechModels, updateSettings, eraseAllVoiceProfiles, setApiKey, openDiagnostics, busy } = useWorkspace(useShallow((state) => ({
     settings: state.settings,
     devices: state.devices,
     people: state.people,
+    speechModels: state.speechModels,
     updateSettings: state.updateSettings,
     eraseAllVoiceProfiles: state.eraseAllVoiceProfiles,
     setApiKey: state.setApiKey,
-    setPyannoteApiKey: state.setPyannoteApiKey,
     openDiagnostics: state.openDiagnostics,
     busy: state.busy,
   })));
-  const [pyannoteKey, setPyannoteKey] = useState("");
+  const modelsReady = speechModels?.state === "ready";
   const [openAiKey, setOpenAiKey] = useState("");
-  const [showPyannoteKey, setShowPyannoteKey] = useState(false);
   const [showOpenAiKey, setShowOpenAiKey] = useState(false);
   const [eraseProfilesConfirmOpen, setEraseProfilesConfirmOpen] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
-  const pyannoteInputRef = useRef<HTMLInputElement>(null);
   const openAiInputRef = useRef<HTMLInputElement>(null);
-  const initialFocus = initialSection === "transcription" ? pyannoteInputRef : initialSection === "text-model" ? openAiInputRef : undefined;
+  const initialFocus = initialSection === "text-model" ? openAiInputRef : undefined;
   const microphoneOptions = [
     { value: "", label: "No microphone", description: "Record the speaker only" },
     ...devices.filter((device) => device.kind === "microphone").map((device) => ({ value: device.id, label: device.name, description: device.subtitle || (device.isDefault ? "System default" : undefined) })),
@@ -45,9 +44,7 @@ export function SettingsDialog({ open, onClose, initialSection }: SettingsDialog
 
   useEffect(() => {
     if (!open) return;
-    setPyannoteKey("");
     setOpenAiKey("");
-    setShowPyannoteKey(false);
     setShowOpenAiKey(false);
   }, [open]);
 
@@ -61,11 +58,6 @@ export function SettingsDialog({ open, onClose, initialSection }: SettingsDialog
     return () => window.cancelAnimationFrame(frame);
   }, [open, initialSection]);
 
-  async function savePyannoteKey(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    if (await setPyannoteApiKey(pyannoteKey.trim())) setPyannoteKey("");
-  }
-
   async function saveOpenAiKey(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (await setApiKey(openAiKey.trim())) setOpenAiKey("");
@@ -73,25 +65,22 @@ export function SettingsDialog({ open, onClose, initialSection }: SettingsDialog
 
   return (
     <>
-    <Modal open={open} title="Settings" description="Configure capture, models, and appearance." onClose={onClose} size="large" initialFocus={initialFocus}>
+    <Modal open={open} title="Settings" description="Capture, speech models and appearance." onClose={onClose} size="large" initialFocus={initialFocus}>
       <div className="settings-content" ref={contentRef}>
         <section className="settings-section" data-settings-section="transcription">
           <div className="settings-section-icon"><AudioWaveform size={18} /></div>
           <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Transcription model</h3><p>Creates the transcript and separates speakers. Audio is processed by your configured pyannote service, which may retain uploads for up to 48 hours.</p></div>{settings.pyannoteApiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Configured</span> : null}</div>
-            <form className="api-key-form" onSubmit={(event) => void savePyannoteKey(event)}>
-              <div className="secret-input"><LockKeyhole size={16} /><input ref={pyannoteInputRef} aria-label="Pyannote API key" autoComplete="off" type={showPyannoteKey ? "text" : "password"} value={pyannoteKey} onChange={(event) => setPyannoteKey(event.target.value)} placeholder={settings.pyannoteApiKeyConfigured ? "Replace pyannote key" : "pyannote API key"} /><button type="button" onClick={() => setShowPyannoteKey((show) => !show)} aria-label={showPyannoteKey ? "Hide key" : "Show key"}>{showPyannoteKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
-              <button className="primary-button" disabled={!pyannoteKey.trim() || busy}><Save size={15} /> Save key</button>
-            </form>
+            <div className="settings-heading"><div><h3>Speech models</h3><p>Transcription, speaker separation and voice matching run on this computer. Recordings never leave it.</p></div>{modelsReady ? <span className="configured-badge"><CheckCircle2 size={14} /> Ready</span> : null}</div>
+            <SpeechModelsPanel />
           </div>
         </section>
 
         <section className="settings-section" data-settings-section="voice">
           <div className="settings-section-icon"><Fingerprint size={18} /></div>
           <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Voice identification</h3><p>Learns each labeled person's voice and names them automatically in future recordings. Uncertain speakers stay unknown.</p></div>{settings.pyannoteApiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Active</span> : null}</div>
+            <div className="settings-heading"><div><h3>Voice identification</h3><p>Learns each labeled person's voice and names them automatically in future recordings. Uncertain speakers stay unknown.</p></div>{modelsReady ? <span className="configured-badge"><CheckCircle2 size={14} /> Active</span> : null}</div>
             <div className="voice-settings-actions">
-              {settings.localSpeakerPersonId ? <label className="settings-toggle"><input type="checkbox" checked={settings.preferLocalSpeakerForMicrophone} onChange={(event) => void updateSettings({ ...settings, preferLocalSpeakerForMicrophone: event.target.checked })} /><span>Prefer {people.find((person) => person.id === settings.localSpeakerPersonId)?.fullName || "my profile"} for clear microphone-only speech</span></label> : <p className="voice-owner-hint">{settings.pyannoteApiKeyConfigured ? "Choose “This is me” for your profile in People to identify clear microphone-only speech." : "Requires the pyannote key above."}</p>}
+              {settings.localSpeakerPersonId ? <label className="settings-toggle"><input type="checkbox" checked={settings.preferLocalSpeakerForMicrophone} onChange={(event) => void updateSettings({ ...settings, preferLocalSpeakerForMicrophone: event.target.checked })} /><span>Prefer {people.find((person) => person.id === settings.localSpeakerPersonId)?.fullName || "my profile"} for clear microphone-only speech</span></label> : <p className="voice-owner-hint">{modelsReady ? "Choose “This is me” for your profile in People to identify clear microphone-only speech." : "Uses the speech models above."}</p>}
               <button className="danger-text-button" type="button" onClick={() => setEraseProfilesConfirmOpen(true)}><Trash2 size={15} /> Erase all voice profiles</button>
             </div>
           </div>
@@ -100,7 +89,7 @@ export function SettingsDialog({ open, onClose, initialSection }: SettingsDialog
         <section className="settings-section" data-settings-section="text-model">
           <div className="settings-section-icon"><Sparkles size={18} /></div>
           <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Text model <small>Optional</small></h3><p>Cleans transcript text and powers questions about your meetings.</p></div>{settings.apiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Configured</span> : null}</div>
+            <div className="settings-heading"><div><h3>Text model <small>Optional</small></h3><p>Polishes transcript wording and answers questions about your meetings. Uses OpenAI, so transcript text is sent to it when enabled.</p></div>{settings.apiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Configured</span> : null}</div>
             <form className="api-key-form" onSubmit={(event) => void saveOpenAiKey(event)}>
               <div className="secret-input"><LockKeyhole size={16} /><input ref={openAiInputRef} aria-label="OpenAI API key" autoComplete="off" type={showOpenAiKey ? "text" : "password"} value={openAiKey} onChange={(event) => setOpenAiKey(event.target.value)} placeholder={settings.apiKeyConfigured ? "Replace OpenAI key" : "sk-…"} /><button type="button" onClick={() => setShowOpenAiKey((show) => !show)} aria-label={showOpenAiKey ? "Hide key" : "Show key"}>{showOpenAiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
               <button className="secondary-button" disabled={!openAiKey.trim() || busy}><Save size={15} /> Save key</button>

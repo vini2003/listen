@@ -164,7 +164,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = VoiceProfileStore::with_key(directory.path().to_path_buf(), [7u8; KEY_BYTES]);
         let person_id = Uuid::new_v4().to_string();
-        let voiceprint = "precision-voiceprint-".repeat(1_000);
+        let voiceprint = "voiceprint-".repeat(1_000);
 
         store.store(&person_id, &voiceprint).expect("store profile");
         assert_eq!(

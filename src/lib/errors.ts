@@ -4,7 +4,8 @@ export function friendlyError(error: unknown, fallback = DEFAULT_MESSAGE): strin
   const raw = error instanceof Error ? error.message : String(error ?? "");
   const message = extractApiMessage(raw)
     .replace(/^OpenAI request failed:\s*/i, "")
-    .replace(/^pyannote request failed:\s*/i, "")
+    .replace(/^Speech processing failed:\s*/i, "")
+    .replace(/^Model download failed:\s*/i, "")
     .replace(/^Audio error:\s*/i, "")
     .replace(/^Invalid request:\s*/i, "")
     .replace(/\s*Error ID [A-F0-9]{8}\.?(?=\s|$)/i, "")
@@ -17,15 +18,15 @@ export function friendlyError(error: unknown, fallback = DEFAULT_MESSAGE): strin
   }
 
   if (/\b401\b|invalid api key|incorrect api key|authentication/i.test(message)) {
-    return "The transcription service rejected its API key. Replace it in Settings and try again.";
+    return "The text model rejected its API key. Replace it in Settings and try again.";
   }
 
   if (/\b429\b|rate.?limit|quota/i.test(message)) {
-    return "The transcription service is busy or the account limit was reached. Try again shortly.";
+    return "The text model is busy or the account limit was reached. Try again shortly.";
   }
 
   if (/\b402\b|billing|credit|budget/i.test(message)) {
-    return "The transcription account needs credits or a larger monthly budget.";
+    return "The text model account needs credits or a larger monthly budget.";
   }
 
   return message.length > 180 ? `${message.slice(0, 177).trimEnd()}…` : message;

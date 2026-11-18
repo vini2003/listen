@@ -12,8 +12,11 @@ pub enum AppError {
     #[error("OpenAI request failed: {0}")]
     OpenAi(String),
 
-    #[error("pyannote request failed: {0}")]
-    Pyannote(String),
+    #[error("Speech processing failed: {0}")]
+    Speech(String),
+
+    #[error("Model download failed: {0}")]
+    Download(String),
 
     #[error("Credential storage error: {0}")]
     Credential(String),

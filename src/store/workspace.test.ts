@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Meeting, Person, Project, TranscriptSegment, WorkspaceSnapshot } from "../domain/models";
+import type { Meeting, Person, Project, SpeechModelsStatus, TranscriptSegment, WorkspaceSnapshot } from "../domain/models";
 
 const service = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
@@ -9,11 +9,30 @@ const service = vi.hoisted(() => ({
   findVoiceEnrollmentSegment: vi.fn(),
   enrollVoiceProfile: vi.fn(),
   reorderMeetings: vi.fn(),
+  speechModelsStatus: vi.fn(),
+  transcriptionProgress: vi.fn(),
+  onSpeechModels: vi.fn(),
+  onTranscriptionProgress: vi.fn(),
 }));
 
 vi.mock("../services/desktop", () => ({ desktop: service }));
 
 import { useWorkspace } from "./workspace";
+
+const readyModels: SpeechModelsStatus = {
+  state: "ready",
+  downloadedBytes: 1_099_180_523,
+  totalBytes: 1_099_180_523,
+  error: null,
+  models: [],
+};
+
+beforeEach(() => {
+  service.speechModelsStatus.mockReset().mockResolvedValue(structuredClone(readyModels));
+  service.transcriptionProgress.mockReset().mockResolvedValue([]);
+  service.onSpeechModels.mockReset().mockResolvedValue(() => undefined);
+  service.onTranscriptionProgress.mockReset().mockResolvedValue(() => undefined);
+});
 
 const firstMeeting: Meeting = {
   id: "meeting-1",
@@ -56,7 +75,6 @@ const snapshot: WorkspaceSnapshot = {
     captureSystem: true,
     theme: "system",
     apiKeyConfigured: false,
-    pyannoteApiKeyConfigured: false,
     localSpeakerPersonId: null,
     preferLocalSpeakerForMicrophone: true,
   },
@@ -191,7 +209,6 @@ describe("automatic voice enrollment", () => {
     return structuredClone({
       ...snapshot,
       people: [{ ...person, voiceProfile: profile }],
-      settings: { ...snapshot.settings, pyannoteApiKeyConfigured: true },
     });
   }
 
@@ -250,6 +267,43 @@ describe("automatic voice enrollment", () => {
     await useWorkspace.getState().assignSpeaker(firstMeeting.id, "A", person.id);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(service.enrollVoiceProfile).not.toHaveBeenCalled();
+  });
+
+  it("relearns pending voices once, shows the work, and reports the outcome", async () => {
+    service.loadWorkspace.mockResolvedValue(enrollmentSnapshot({
+      status: "pending_sample",
+      enrollmentDurationMs: null,
+      enrollmentClipCount: null,
+      source: null,
+      updatedAt: "2026-08-31T00:00:00Z",
+      lastError: "Relearning this voice on this device",
+    }));
+    let finish: (value: Person) => void = () => undefined;
+    service.enrollVoiceProfile.mockImplementation(() => new Promise<Person>((resolve) => { finish = resolve; }));
+    useWorkspace.setState({ toasts: [], voiceLearning: [] });
+    await useWorkspace.getState().load();
+
+    await vi.waitFor(() => expect(service.enrollVoiceProfile).toHaveBeenCalledTimes(1));
+    expect(useWorkspace.getState().voiceLearning).toEqual([person.id]);
+    finish({ ...person, voiceProfile: { status: "ready", enrollmentDurationMs: 12_000, enrollmentClipCount: 2, source: "microphone", updatedAt: "2026-08-31T00:00:00Z", lastError: null } });
+
+    await vi.waitFor(() => expect(useWorkspace.getState().voiceLearning).toEqual([]));
+    expect(useWorkspace.getState().toasts.at(-1)).toMatchObject({ tone: "notice", message: "Learned Ben's voice." });
+  });
+
+  it("explains a voice that could not be learned after labelling", async () => {
+    service.loadWorkspace.mockResolvedValue(enrollmentSnapshot(null));
+    service.enrollVoiceProfile.mockResolvedValue({
+      ...person,
+      voiceProfile: { status: "failed", enrollmentDurationMs: null, enrollmentClipCount: null, source: null, updatedAt: "2026-08-31T00:00:00Z", lastError: "The voice matching model could not run." },
+    });
+    useWorkspace.setState({ toasts: [] });
+    await useWorkspace.getState().load();
+    useWorkspace.setState({ toasts: [] });
+
+    await useWorkspace.getState().assignSpeaker(firstMeeting.id, "A", person.id);
+    await vi.waitFor(() => expect(useWorkspace.getState().toasts.some((toast) => toast.tone === "error"
+      && toast.message.includes("Couldn't learn Ben's voice"))).toBe(true));
   });
 
   it("never enrolls a person whose automatic labeling is turned off", async () => {

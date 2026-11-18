@@ -31,14 +31,16 @@ import { moveMenuFocus } from "../../lib/focus";
 import { meaningfulMeetingDrop, type MeetingDropSpot } from "../../lib/meetingDrop";
 import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
+import type { SettingsSection } from "../dialogs/SettingsDialog";
 import { ProjectActions } from "../project/ProjectActions";
 import { Modal } from "../ui/Modal";
+import { ActivityTray, TranscriptionRing } from "./ActivityTray";
 
 interface SidebarProps {
   onCreateProject: () => void;
   onCreateMeeting: (projectId: string | null) => void;
   onOpenPeople: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: SettingsSection) => void;
 }
 
 type DropSpot = MeetingDropSpot;
@@ -871,9 +873,10 @@ export function Sidebar({
         </div>
       </nav>
 
+      <ActivityTray onOpenSpeechSettings={() => onOpenSettings("transcription")} />
       <footer className="sidebar-footer">
         <button onClick={onOpenPeople}><UserRound size={17} /><span>People</span></button>
-        <button onClick={onOpenSettings} aria-keyshortcuts={shortcutAria(",")} title={`Settings (${shortcutLabel(",")})`}><Settings size={17} /><span>Settings</span></button>
+        <button onClick={() => onOpenSettings()} aria-keyshortcuts={shortcutAria(",")} title={`Settings (${shortcutLabel(",")})`}><Settings size={17} /><span>Settings</span></button>
       </footer>
 
       <AnimatePresence>
@@ -1131,11 +1134,12 @@ function MeetingRow({
           onDragOver={onDragOver}
           onDrop={onDrop}
         >
-          {meeting.status === "recording" || meeting.status === "processing" || meeting.status === "failed" ? (
+          {meeting.status === "processing" ? <TranscriptionRing meetingId={meeting.id} /> : null}
+          {meeting.status === "recording" || meeting.status === "failed" ? (
             <span
               className={`status-dot status-${meeting.status}`}
               role="img"
-              aria-label={meeting.status === "recording" ? "Recording" : meeting.status === "processing" ? "Transcribing" : "Transcription failed"}
+              aria-label={meeting.status === "recording" ? "Recording" : "Transcription failed"}
             />
           ) : null}
           <span className="meeting-row-copy"><span>{meeting.title}</span></span>

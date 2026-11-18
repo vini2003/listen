@@ -124,9 +124,36 @@ export interface AppSettings {
   captureSystem: boolean;
   theme: "light" | "dark" | "system";
   apiKeyConfigured: boolean;
-  pyannoteApiKeyConfigured: boolean;
   localSpeakerPersonId: string | null;
   preferLocalSpeakerForMicrophone: boolean;
+}
+
+export type SpeechModelsState = "missing" | "downloading" | "verifying" | "ready" | "failed";
+
+export interface SpeechModel {
+  id: string;
+  name: string;
+  role: string;
+  licence: string;
+  sizeBytes: number;
+  installed: boolean;
+}
+
+export interface SpeechModelsStatus {
+  state: SpeechModelsState;
+  downloadedBytes: number;
+  totalBytes: number;
+  error: string | null;
+  models: SpeechModel[];
+}
+
+export type TranscriptionPhase = "queued" | "preparing" | "separating" | "transcribing" | "identifying" | "polishing";
+
+export interface TranscriptionProgress {
+  meetingId: string;
+  phase: TranscriptionPhase;
+  /** Whole-job progress from 0 to 1. */
+  progress: number;
 }
 
 export interface WorkspaceSnapshot {

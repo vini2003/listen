@@ -7,14 +7,19 @@ mod domain;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_system_audio;
-mod pyannote;
+mod speech;
 mod speech_audio;
+mod speech_models;
 mod transcript_cleanup;
 mod transcription;
 mod voice_profile_store;
 mod voice_reference;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use audio::RecordingManager;
 use database::Database;
@@ -27,14 +32,23 @@ use domain::{
 use error::{AppError, AppResult};
 use parking_lot::Mutex;
 use serde::Serialize;
+use speech_models::{SpeechModels, SpeechModelsStatus};
 use tauri::{Emitter, Manager, State};
+use transcription::{Phase, TranscriptionProgress};
 use voice_profile_store::VoiceProfileStore;
+
+const TRANSCRIPTION_PROGRESS_EVENT: &str = "listen://transcription-progress";
+const SPEECH_MODELS_EVENT: &str = "listen://speech-models";
 
 struct AppState {
     database: Database,
     recordings_directory: PathBuf,
     diagnostics: Diagnostics,
     voice_profiles: VoiceProfileStore,
+    speech_models: Arc<SpeechModels>,
+    /// The models use most of the CPU, so meetings are transcribed one at a time.
+    transcription_queue: tokio::sync::Mutex<()>,
+    transcription_progress: Arc<Mutex<HashMap<String, TranscriptionProgress>>>,
     assistant_meeting_id: Mutex<Option<String>>,
 }
 
@@ -56,7 +70,6 @@ struct ChatUpdatedEvent {
 fn load_workspace(state: State<'_, AppState>) -> AppResult<WorkspaceSnapshot> {
     let mut settings = state.database.settings()?;
     settings.api_key_configured = credentials::has_openai_key()?;
-    settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
     let devices = audio::list_devices().unwrap_or_default();
     if !settings.microphone_device_id.as_ref().is_some_and(|id| {
         devices
@@ -103,7 +116,6 @@ fn load_assistant_context(
 ) -> AppResult<AssistantContext> {
     let mut settings = state.database.settings()?;
     settings.api_key_configured = credentials::has_openai_key()?;
-    settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
     Ok(AssistantContext {
         meeting: state.database.meeting(&meeting_id)?,
         meetings: state.database.meetings()?,
@@ -350,7 +362,6 @@ fn update_person(state: State<'_, AppState>, id: String, draft: PersonDraft) -> 
 #[tauri::command]
 fn delete_person(state: State<'_, AppState>, id: String) -> AppResult<()> {
     state.voice_profiles.delete(&id)?;
-    credentials::delete_legacy_voiceprint(&id)?;
     state.database.delete_person(&id)?;
     let mut settings = state.database.settings()?;
     if settings.local_speaker_person_id.as_deref() == Some(id.as_str()) {
@@ -392,7 +403,6 @@ fn restore_transcript_segments(
 #[tauri::command]
 fn forget_voice_profile(state: State<'_, AppState>, person_id: String) -> AppResult<Person> {
     state.voice_profiles.delete(&person_id)?;
-    credentials::delete_legacy_voiceprint(&person_id)?;
     state.database.disable_voice_profile(&person_id)?;
     state
         .database
@@ -406,7 +416,6 @@ fn forget_voice_profile(state: State<'_, AppState>, person_id: String) -> AppRes
 fn forget_all_voice_profiles(state: State<'_, AppState>) -> AppResult<()> {
     for profile in state.database.voice_profiles()? {
         state.voice_profiles.delete(&profile.person_id)?;
-        credentials::delete_legacy_voiceprint(&profile.person_id)?;
         state.database.disable_voice_profile(&profile.person_id)?;
     }
     Ok(())
@@ -430,21 +439,24 @@ async fn enroll_voice_profile(
     speaker_label: String,
     person_id: String,
 ) -> AppResult<Person> {
+    let embedder = state.speech_models.embedder_path()?;
     state.database.mark_voice_profile_learning(&person_id)?;
+    // Shares the transcription queue: both run models on most of the CPU.
+    let _turn = state.transcription_queue.lock().await;
     let result = async {
-        let api_key = credentials::pyannote_key()?;
-        let client = pyannote::PyannoteClient::new(api_key)?;
-        let reference = voice_reference::learn_from_assignment(
-            &state.database,
-            &client,
-            &meeting_id,
-            &speaker_label,
-            &person_id,
-        )
-        .await?;
+        let database = state.database.clone();
+        let (meeting, speaker, person) =
+            (meeting_id.clone(), speaker_label.clone(), person_id.clone());
+        let reference = tauri::async_runtime::spawn_blocking(move || {
+            voice_reference::learn_from_assignment(
+                &database, &embedder, &meeting, &speaker, &person,
+            )
+        })
+        .await
+        .map_err(|error| AppError::Speech(format!("The voice worker stopped: {error}")))??;
         state
             .voice_profiles
-            .store(&person_id, &reference.voiceprint)?;
+            .store(&person_id, &reference.voiceprint.encode())?;
         if let Err(error) = state.database.save_voice_profile(
             &person_id,
             &meeting_id,
@@ -505,7 +517,6 @@ fn update_settings(
     mut settings: AppSettings,
 ) -> AppResult<AppSettings> {
     settings.api_key_configured = credentials::has_openai_key()?;
-    settings.pyannote_api_key_configured = credentials::has_pyannote_key()?;
     state.database.update_settings(&settings)
 }
 
@@ -515,14 +526,57 @@ fn set_api_key(api_key: String) -> AppResult<bool> {
 }
 
 #[tauri::command]
-async fn set_pyannote_api_key(api_key: String) -> AppResult<bool> {
-    let api_key = api_key.trim();
-    if api_key.is_empty() {
-        return credentials::set_pyannote_key(api_key);
+fn speech_models_status(state: State<'_, AppState>) -> SpeechModelsStatus {
+    state.speech_models.status()
+}
+
+#[tauri::command]
+async fn download_speech_models(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SpeechModelsStatus> {
+    let models = state.speech_models.clone();
+    let emitter = app.clone();
+    let result = models
+        .download(move |status| {
+            let _ = emitter.emit(SPEECH_MODELS_EVENT, status);
+        })
+        .await;
+    if let Err(error) = &result {
+        state
+            .diagnostics
+            .record_pipeline_warning("-", "model_download", &error.to_string());
     }
-    let client = pyannote::PyannoteClient::new(api_key.to_string())?;
-    client.validate_key().await?;
-    credentials::set_pyannote_key(api_key)
+    result.map(|()| models.status())
+}
+
+#[tauri::command]
+fn cancel_speech_models_download(state: State<'_, AppState>) {
+    state.speech_models.cancel();
+}
+
+#[tauri::command]
+fn remove_speech_models(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SpeechModelsStatus> {
+    let _idle = state.transcription_queue.try_lock().map_err(|_| {
+        AppError::Validation("Wait for the current transcription to finish".to_string())
+    })?;
+    state.speech_models.remove()?;
+    let status = state.speech_models.status();
+    let _ = app.emit(SPEECH_MODELS_EVENT, status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+fn transcription_progress(state: State<'_, AppState>) -> Vec<TranscriptionProgress> {
+    state
+        .transcription_progress
+        .lock()
+        .values()
+        .cloned()
+        .collect()
 }
 
 #[tauri::command(async)]
@@ -581,8 +635,23 @@ fn stop_recording(
 }
 
 #[tauri::command]
-async fn transcribe_meeting(state: State<'_, AppState>, meeting_id: String) -> AppResult<Meeting> {
-    transcribe_and_mark(&state, &meeting_id).await
+async fn transcribe_meeting(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> AppResult<Meeting> {
+    let progress_map = state.transcription_progress.clone();
+    let progress_meeting = meeting_id.clone();
+    let progress: transcription::ProgressSink = Arc::new(move |phase, fraction| {
+        let update = TranscriptionProgress::new(&progress_meeting, phase, fraction);
+        progress_map
+            .lock()
+            .insert(progress_meeting.clone(), update.clone());
+        let _ = app.emit(TRANSCRIPTION_PROGRESS_EVENT, update);
+    });
+    let result = transcribe_and_mark(&state, &meeting_id, progress).await;
+    state.transcription_progress.lock().remove(&meeting_id);
+    result
 }
 
 #[tauri::command(async)]
@@ -690,25 +759,37 @@ fn notify_other_chat_window(
     );
 }
 
-async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Meeting> {
+async fn transcribe_and_mark(
+    state: &AppState,
+    meeting_id: &str,
+    progress: transcription::ProgressSink,
+) -> AppResult<Meeting> {
+    state.speech_models.paths()?;
     state.database.mark_processing(meeting_id)?;
-    let report =
-        match transcription::transcribe_meeting(&state.database, &state.voice_profiles, meeting_id)
-            .await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                let (category, message) = transcription::failure_summary(&error);
-                let diagnostic_id = state.diagnostics.record_transcription_error(
-                    meeting_id,
-                    category,
-                    &error.to_string(),
-                );
-                let public_message = format!("{message} Error ID {diagnostic_id}.");
-                let _ = state.database.mark_failed(meeting_id, &public_message);
-                return Err(AppError::Pyannote(public_message));
-            }
-        };
+    progress(Phase::Queued, 0.0);
+    let _turn = state.transcription_queue.lock().await;
+    let result = transcription::transcribe_meeting(
+        &state.database,
+        &state.voice_profiles,
+        &state.speech_models,
+        meeting_id,
+        progress,
+    )
+    .await;
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            let (category, message) = transcription::failure_summary(&error);
+            let diagnostic_id = state.diagnostics.record_transcription_error(
+                meeting_id,
+                category,
+                &error.to_string(),
+            );
+            let public_message = format!("{message} Error ID {diagnostic_id}.");
+            let _ = state.database.mark_failed(meeting_id, &public_message);
+            return Err(AppError::Speech(public_message));
+        }
+    };
     if let Some(error) = report.cleanup_error {
         state.diagnostics.record_cleanup_error(meeting_id, &error);
     }
@@ -716,11 +797,6 @@ async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Me
         state
             .diagnostics
             .record_pipeline_warning(meeting_id, "identification", &error);
-    }
-    if let Some(warning) = report.warning {
-        state
-            .diagnostics
-            .record_pipeline_warning(meeting_id, "precision-2", &warning);
     }
     for decision in &report.identity_decisions {
         state.diagnostics.record_identity_decision(
@@ -733,7 +809,6 @@ async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Me
             report.identity_candidates,
         );
     }
-    // Keeps recently-matched voiceprints ahead of the 50-profile identification cap.
     let matched_people: Vec<String> = report
         .identity_decisions
         .iter()
@@ -747,9 +822,10 @@ async fn transcribe_and_mark(state: &AppState, meeting_id: &str) -> AppResult<Me
     state.diagnostics.record_transcription_completed(
         meeting_id,
         &report.active_sources,
-        report.minimum_speakers,
-        &report.detected_speakers,
-        &report.transcribed_speakers,
+        report.speaker_count,
+        &report.merged_labels,
+        report.audio_ms,
+        report.elapsed,
     );
     state.database.mark_ready(meeting_id)
 }
@@ -785,48 +861,25 @@ pub fn run() {
                     .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             }
             let voice_profiles = VoiceProfileStore::new(app_data_dir.join("voice-profiles"));
-            for profile in database.voice_profiles().unwrap_or_default() {
-                let legacy = profile.voiceprint.or_else(|| {
-                    credentials::legacy_voiceprint(&profile.person_id)
-                        .ok()
-                        .flatten()
-                });
-                if let Some(voiceprint) = legacy {
-                    if voice_profiles
-                        .store(&profile.person_id, &voiceprint)
-                        .is_ok()
-                    {
-                        let _ = database.clear_voiceprint_blob(&profile.person_id);
-                        let _ = credentials::delete_legacy_voiceprint(&profile.person_id);
+            // Voiceprints from the hosted service cannot be compared with local
+            // ones; those people are relearned from their labelled speech.
+            match database.retire_foreign_voice_profiles() {
+                Ok(retired) if !retired.is_empty() => {
+                    for person_id in &retired {
+                        let _ = voice_profiles.delete(person_id);
                     }
+                    let _ = credentials::delete_retired_secrets(&retired);
                 }
-            }
-            // Consent was removed in 0.3: promote profiles that were parked
-            // behind the old per-person permission gate.
-            for profile in database.voice_profiles().unwrap_or_default() {
-                if profile.status != "consent_required" {
-                    continue;
-                }
-                let has_print = profile.voiceprint.is_some()
-                    || voice_profiles
-                        .load(&profile.person_id)
-                        .ok()
-                        .flatten()
-                        .is_some();
-                if has_print {
-                    let _ = database.activate_existing_voice_profile(&profile.person_id);
-                } else {
-                    let _ = database.mark_voice_profile_pending(
-                        &profile.person_id,
-                        "The voice profile will be learned from the next labeled recording",
-                    );
-                }
+                _ => {}
             }
             app.manage(AppState {
                 database,
                 recordings_directory: app_data_dir.join("recordings"),
                 diagnostics: Diagnostics::new(&app_data_dir),
                 voice_profiles,
+                speech_models: Arc::new(SpeechModels::new(app_data_dir.join("speech-models"))),
+                transcription_queue: tokio::sync::Mutex::new(()),
+                transcription_progress: Arc::new(Mutex::new(HashMap::new())),
                 assistant_meeting_id: Mutex::new(None),
             });
             app.manage(RecordingManager::default());
@@ -884,7 +937,11 @@ pub fn run() {
             enroll_voice_profile,
             update_settings,
             set_api_key,
-            set_pyannote_api_key,
+            speech_models_status,
+            download_speech_models,
+            cancel_speech_models_download,
+            remove_speech_models,
+            transcription_progress,
             open_diagnostics,
             start_recording,
             stop_recording,

@@ -92,23 +92,29 @@ impl Diagnostics {
         &self,
         meeting_id: &str,
         active_sources: &[String],
-        minimum_speakers: Option<u8>,
-        detected_speakers: &[String],
-        transcribed_speakers: &[String],
+        speaker_count: usize,
+        merged_labels: &[f32],
+        audio_ms: i64,
+        elapsed: std::time::Duration,
     ) -> String {
+        let seconds = elapsed.as_secs_f64().max(0.001);
         self.record_event(
             "transcription.completed",
             &format!(
-                "meeting={} active_sources={} minimum_speakers={} diarized_speakers={} diarized_labels={} transcribed_speakers={} transcribed_labels={}",
+                "meeting={} active_sources={} speakers={} merged_labels={} audio_ms={} elapsed_ms={} speed={:.0}x",
                 sanitize_field(meeting_id),
                 sanitize_field(&active_sources.join(",")),
-                minimum_speakers
-                    .map(|count| count.to_string())
-                    .unwrap_or_else(|| "auto".to_string()),
-                detected_speakers.len(),
-                sanitize_field(&detected_speakers.join(",")),
-                transcribed_speakers.len(),
-                sanitize_field(&transcribed_speakers.join(","))
+                speaker_count,
+                sanitize_field(
+                    &merged_labels
+                        .iter()
+                        .map(|similarity| format!("{similarity:.2}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                audio_ms,
+                elapsed.as_millis(),
+                audio_ms as f64 / 1_000.0 / seconds,
             ),
         )
     }
