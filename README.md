@@ -8,7 +8,7 @@ Listen is a minimal, local-first desktop application for recording, organizing, 
 - Disk-backed microphone recording with bounded WAV segments; completed chunks survive an interrupted session
 - Simultaneous microphone and WASAPI loopback capture on Windows
 - PipeWire/PulseAudio monitor-source capture on Linux when exposed by the host
-- Native microphone and ScreenCaptureKit system-audio capture on macOS 13 or newer
+- Native microphone and ScreenCaptureKit system-audio capture on macOS 13.4 or newer (Apple Silicon)
 - SQLite persistence for projects, recordings, speakers, and transcript segments
 - On-device, speaker-attributed transcription: NVIDIA Nemotron 3 Diarization separates speakers and Parakeet TDT 0.6B v3 transcribes, both on the CPU through ONNX Runtime
 - Speaker profiles with automatic, source-isolated WeSpeaker voiceprints, matched locally against every saved person
@@ -18,7 +18,7 @@ Listen is a minimal, local-first desktop application for recording, organizing, 
 - A one-time, resumable, checksum-verified download of the speech models (1.1 GB), managed in Settings
 - Optional OpenAI credentials stored in the operating system credential vault
 - Light, dark, and system themes
-- Tauri packaging configuration for Windows, macOS, and Linux
+- Releases for Windows x64, macOS on Apple Silicon (13.4+), and Linux x64 with glibc 2.39+ (Ubuntu 24.04, Debian 13, Fedora 40 or newer). ONNX Runtime publishes no build for Intel Macs, so those stay on 0.4.
 
 Listen renders a normalized 16 kHz meeting file after recording stops and runs it through three local models: Nemotron 3 Diarization finds who speaks when, Parakeet TDT transcribes 30-second windows cut at pauses, and each word is attributed to the speaker talking over it. WeSpeaker then measures every detected voice, folds labels that turn out to be the same person, and names voices that clearly match a saved person. On a Ryzen 9 9950X3D an hour of audio takes about two and a half minutes using four threads. A bounded Luna pass can then correct likely recognition mistakes and punctuation without changing timestamps or speaker identities. On macOS, system audio uses ScreenCaptureKit and requires permission under Privacy & Security > Screen & System Audio Recording.
 

@@ -48,7 +48,7 @@
     "shortDescription": "Record, organize, and transcribe conversations.",
     "longDescription": "Listen is a local-first meeting recorder with projects, speaker profiles, and on-device transcription.",
     "macOS": {
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "13.4",
       "signingIdentity": "-"
     },
     "linux": {
