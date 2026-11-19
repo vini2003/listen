@@ -19,7 +19,7 @@ const MIN_CLIP_MS: i64 = 1_500;
 const MIN_SIGNAL_RMS: f64 = 140.0;
 const MIN_SOURCE_DOMINANCE: f64 = 1.65;
 const OVERLAP_TOLERANCE_MS: i64 = 200;
-const METADATA_FILENAME: &str = "speaker-overlaps.json";
+pub(crate) const METADATA_FILENAME: &str = "speaker-overlaps.json";
 
 #[derive(Debug)]
 pub struct LearnedVoiceprint {
@@ -124,8 +124,30 @@ pub fn learn_from_assignment(
     })
 }
 
-pub fn write_overlap_metadata(directory: &Path, spans: &[SpeakerSpan]) -> AppResult<()> {
-    let mut overlaps = Vec::new();
+pub fn write_overlap_metadata(
+    directory: &Path,
+    spans: &[SpeakerSpan],
+    append_from_ms: Option<i64>,
+) -> AppResult<()> {
+    let path = directory.join(METADATA_FILENAME);
+    let mut overlaps = match append_from_ms {
+        Some(start_ms) => match fs::read(&path) {
+            Ok(bytes) => {
+                let mut prior: Vec<TimeRange> =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        AppError::Audio(format!("Could not read speaker metadata: {error}"))
+                    })?;
+                prior.retain_mut(|range| {
+                    range.end_ms = range.end_ms.min(start_ms);
+                    range.start_ms < range.end_ms
+                });
+                prior
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        },
+        None => Vec::new(),
+    };
     for (index, left) in spans.iter().enumerate() {
         for right in spans.iter().skip(index + 1) {
             if left.speaker == right.speaker {
@@ -150,12 +172,10 @@ pub fn write_overlap_metadata(directory: &Path, spans: &[SpeakerSpan]) -> AppRes
             merged.push(range);
         }
     }
-    fs::write(
-        directory.join(METADATA_FILENAME),
-        serde_json::to_vec(&merged).map_err(|error| {
-            AppError::Audio(format!("Could not encode speaker metadata: {error}"))
-        })?,
-    )?;
+    let temporary = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(temporary.as_file(), &merged)
+        .map_err(|error| AppError::Audio(format!("Could not encode speaker metadata: {error}")))?;
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -310,12 +330,39 @@ mod tests {
             },
         ];
 
-        write_overlap_metadata(directory.path(), &spans).expect("speaker metadata");
+        write_overlap_metadata(directory.path(), &spans, None).expect("speaker metadata");
         let ranges = read_overlap_metadata(directory.path());
 
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].start_ms, 2_000);
         assert_eq!(ranges[0].end_ms, 3_000);
+    }
+
+    #[test]
+    fn retrying_an_append_preserves_only_prior_overlap_ranges() {
+        let directory = tempfile::tempdir().unwrap();
+        let spans = |start_ms| {
+            vec![
+                SpeakerSpan {
+                    speaker: 0,
+                    start_ms,
+                    end_ms: start_ms + 2_000,
+                },
+                SpeakerSpan {
+                    speaker: 1,
+                    start_ms: start_ms + 500,
+                    end_ms: start_ms + 1_500,
+                },
+            ]
+        };
+        write_overlap_metadata(directory.path(), &spans(0), None).unwrap();
+        write_overlap_metadata(directory.path(), &spans(5_000), Some(5_000)).unwrap();
+        write_overlap_metadata(directory.path(), &spans(6_000), Some(5_000)).unwrap();
+        let ranges: Vec<_> = read_overlap_metadata(directory.path())
+            .into_iter()
+            .map(|r| (r.start_ms, r.end_ms))
+            .collect();
+        assert_eq!(ranges, [(500, 1_500), (6_500, 7_500)]);
     }
 
     #[test]

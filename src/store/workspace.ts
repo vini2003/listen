@@ -5,10 +5,13 @@ import type {
   ChatScope,
   Folder,
   FolderDraft,
+  MediaImportFile,
+  MediaImportProgress,
   Meeting,
   MeetingDraft,
   MeetingPlacement,
   PersonDraft,
+  Project,
   ProjectDraft,
   RecordingLevels,
   SpeechModelsStatus,
@@ -34,9 +37,11 @@ interface WorkspaceState extends WorkspaceSnapshot {
   selectedMeetingId: string | null;
   selectedProjectId: string | null;
   loading: boolean;
+  loadError: string | null;
   busy: boolean;
   segmentsLoading: boolean;
   recordingPaused: boolean;
+  mediaImport: MediaImportProgress | null;
   chatMessages: ChatMessage[];
   chatScopeKey: string | null;
   chatLoading: boolean;
@@ -62,6 +67,8 @@ interface WorkspaceState extends WorkspaceSnapshot {
   moveFolder: (id: string, parentId: string | null) => Promise<boolean>;
   deleteFolder: (id: string) => Promise<boolean>;
   createMeeting: (draft: MeetingDraft) => Promise<Meeting | null>;
+  pickMeetingMedia: () => Promise<MediaImportFile | null>;
+  importMeetingMedia: (target: string | MeetingDraft, file: MediaImportFile) => Promise<boolean>;
   renameMeeting: (id: string, title: string) => Promise<boolean>;
   moveMeeting: (id: string, projectId: string | null) => Promise<boolean>;
   reorderMeeting: (id: string, target: MeetingDropSpot) => Promise<boolean>;
@@ -113,16 +120,26 @@ const emptySnapshot: WorkspaceSnapshot = {
   },
 };
 
+function orderedProjects(projects: Project[], ids: string[]): Project[] {
+  const rank = new Map(ids.map((id, index) => [id, index]));
+  return [...projects]
+    .sort((a, b) => (rank.get(a.id) ?? ids.length) - (rank.get(b.id) ?? ids.length))
+    .map((project, position) => project.position === position ? project : { ...project, position });
+}
+
 export const useWorkspace = create<WorkspaceState>((set, get) => {
   let recoveryStarted = false;
-  let desktopEventsStarted = false;
+  let desktopEvents: Promise<unknown> | null = null;
+  let speechModelVersion = 0;
   let nextToastId = 1;
+  let projectOrderWrite: Promise<boolean> | null = null;
+  let savedProjectIds: string[] = [];
   const undoStack: HistoryEntry[] = [];
   const redoStack: HistoryEntry[] = [];
   const enrollmentInFlight = new Set<string>();
 
-  function showError(error: unknown): void {
-    const toast: AppToast = { id: nextToastId++, message: friendlyError(error), tone: "error" };
+  function showError(error: unknown, context?: "media-import"): void {
+    const toast: AppToast = { id: nextToastId++, message: friendlyError(error, undefined, context), tone: "error" };
     set((state) => ({ toasts: [...state.toasts.slice(-3), toast] }));
   }
 
@@ -163,6 +180,23 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     }));
   }
 
+  function storeCreatedMeeting(created: Meeting, select = true): void {
+    set((state) => ({
+      meetings: [
+        created,
+        ...state.meetings.map((meeting) => meeting.projectId === created.projectId && meeting.folderId === null
+          ? { ...meeting, position: meeting.position + 1 }
+          : meeting),
+      ],
+      ...(select ? {
+        segments: [],
+        segmentsLoading: false,
+        selectedMeetingId: created.id,
+        selectedProjectId: created.projectId,
+      } : {}),
+    }));
+  }
+
   function storePerson(person: WorkspaceSnapshot["people"][number]): void {
     set((state) => ({
       people: state.people.map((candidate) => candidate.id === person.id ? person : candidate),
@@ -197,7 +231,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     if (profile?.status === "failed") {
       showError(`Couldn't learn ${personName(personId)}'s voice. ${profile.lastError ?? "Open the log for details."}`);
     } else if (profile?.status === "pending_sample" && profile.lastError) {
-      showNotice(`${personName(personId)} needs at least 8 seconds of clear, solo speech before Listen can recognise them. Label more of their passages.`);
+      showNotice(`Label at least 8 seconds of ${personName(personId)} speaking alone to learn their voice.`);
     }
     return false;
   }
@@ -208,8 +242,12 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
 
   function storeSpeechModels(status: SpeechModelsStatus): void {
     const wasReady = speechReady();
+    speechModelVersion += 1;
     set({ speechModels: status });
-    if (!wasReady && status.state === "ready") void enrollPendingPeople();
+    if (!wasReady && status.state === "ready" && !get().loading) {
+      void enrollPendingPeople();
+      recoverTranscriptions();
+    }
   }
 
   function storeProgress(progress: TranscriptionProgress): void {
@@ -226,11 +264,19 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     });
   }
 
-  function startDesktopEvents(): void {
-    if (desktopEventsStarted) return;
-    desktopEventsStarted = true;
-    void desktop.onSpeechModels(storeSpeechModels);
-    void desktop.onTranscriptionProgress(storeProgress);
+  function startDesktopEvents(): Promise<unknown> {
+    desktopEvents ??= Promise.allSettled([
+      desktop.onSpeechModels(storeSpeechModels),
+      desktop.onTranscriptionProgress(storeProgress),
+    ]).then((results) => {
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") {
+        for (const result of results) if (result.status === "fulfilled") result.value();
+        desktopEvents = null;
+        throw failed.reason;
+      }
+    });
+    return desktopEvents;
   }
 
   /** Learns voices for people who were labelled before the models were ready. */
@@ -346,6 +392,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
   }
 
   async function runHistory(direction: "undo" | "redo"): Promise<void> {
+    if (projectOrderWrite) await projectOrderWrite;
     const source = direction === "undo" ? undoStack : redoStack;
     const destination = direction === "undo" ? redoStack : undoStack;
     const entry = source.pop();
@@ -453,9 +500,16 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     return true;
   }
 
-  async function resumeInterruptedTranscriptions(meetingIds: string[]): Promise<void> {
-    // The desktop queues these itself; starting them together shows each as queued.
-    await Promise.all(meetingIds.map((meetingId) => transcribe(meetingId)));
+  function recoverTranscriptions(): void {
+    if (recoveryStarted || !speechReady()) return;
+    recoveryStarted = true;
+    const { meetings, transcriptionProgress } = get();
+    // Jobs in the progress map survived a window reload and are still running.
+    for (const meeting of meetings) {
+      if (meeting.status === "processing" && meeting.durationMs > 0 && !transcriptionProgress[meeting.id]) {
+        void transcribe(meeting.id);
+      }
+    }
   }
 
   return {
@@ -463,9 +517,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     selectedMeetingId: null,
     selectedProjectId: null,
     loading: true,
+    loadError: null,
     busy: false,
     segmentsLoading: false,
     recordingPaused: false,
+    mediaImport: null,
     chatMessages: [],
     chatScopeKey: null,
     chatLoading: false,
@@ -478,9 +534,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     canRedo: false,
 
     async load() {
-      set({ loading: true });
-      startDesktopEvents();
+      set({ loading: true, loadError: null });
       try {
+        await startDesktopEvents();
+        const version = speechModelVersion;
         const [snapshot, speechModels, progress] = await Promise.all([
           desktop.loadWorkspace(),
           desktop.speechModelsStatus(),
@@ -496,27 +553,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
           segmentsLoading: false,
           selectedMeetingId,
           selectedProjectId: snapshot.meetings[0]?.projectId ?? null,
-          speechModels,
+          speechModels: version === speechModelVersion ? speechModels : get().speechModels ?? speechModels,
           transcriptionProgress: Object.fromEntries(progress.map((entry) => [entry.meetingId, entry])),
         });
-        if (speechModels.state === "ready") void enrollPendingPeople();
-        const selected = snapshot.meetings[0];
-        if (selected?.status === "failed" && selected.errorMessage) {
-          showError(selected.errorMessage);
-        }
-        if (!recoveryStarted) {
-          recoveryStarted = true;
-          // A job still in the progress map survived a window reload and is running.
-          const interruptedMeetingIds = snapshot.meetings
-            .filter((meeting) => meeting.status === "processing" && meeting.durationMs > 0)
-            .filter((meeting) => !progress.some((entry) => entry.meetingId === meeting.id))
-            .map((meeting) => meeting.id);
-          if (interruptedMeetingIds.length > 0) {
-            void resumeInterruptedTranscriptions(interruptedMeetingIds);
-          }
-        }
+        if (speechReady()) void enrollPendingPeople();
+        recoverTranscriptions();
       } catch (error) {
-        showError(error);
+        set({ loadError: friendlyError(error) });
       } finally {
         set({ loading: false });
       }
@@ -528,7 +571,6 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       const meeting = get().meetings.find((candidate) => candidate.id === id);
       set({ selectedMeetingId: id, selectedProjectId: meeting?.projectId ?? null, segments: [], segmentsLoading: true });
       void loadSegmentsForMeeting(id);
-      if (meeting?.status === "failed" && meeting.errorMessage) showError(meeting.errorMessage);
     },
 
     selectProject(id) {
@@ -551,7 +593,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       const succeeded = await run(async () => {
         const renamed = await desktop.renameProject(id, name);
         set((state) => ({
-          projects: state.projects.map((candidate) => candidate.id === id ? renamed : candidate),
+          projects: state.projects.map((candidate) => candidate.id === id ? { ...candidate, name: renamed.name } : candidate),
         }));
         return true;
       });
@@ -580,24 +622,37 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     },
 
     async reorderProjects(ids) {
-      const previousIds = get().projects.map((project) => project.id);
-      if (previousIds.join() === ids.join()) return true;
-      const succeeded = await run(async () => {
-        await desktop.reorderProjects(ids);
-        const positions = new Map(ids.map((id, position) => [id, position]));
-        set((state) => ({
-          projects: state.projects
-            .map((project) => ({ ...project, position: positions.get(project.id) ?? project.position }))
-            .sort((a, b) => a.position - b.position),
-        }));
-        return true;
+      const current = get().projects;
+      const projects = orderedProjects(current, ids);
+      if (projects.every((project, index) => project.id === current[index].id)) return true;
+      const nextIds = projects.map((project) => project.id);
+      if (!projectOrderWrite) savedProjectIds = current.map((project) => project.id);
+
+      // Show every drop immediately and save in drop order. If a later drop is
+      // already visible, an earlier failure must not roll it back.
+      const write: Promise<boolean> = (projectOrderWrite ?? Promise.resolve()).then(async () => {
+        const previousIds = savedProjectIds;
+        const persist = (order: string[]) => desktop.reorderProjects(orderedProjects(get().projects, order).map((p) => p.id));
+        try {
+          await persist(nextIds);
+          savedProjectIds = nextIds;
+          remember({ undo: () => persist(previousIds), redo: () => persist(nextIds) });
+          return true;
+        } catch (error) {
+          if (projectOrderWrite === write) {
+            set((state) => ({ projects: orderedProjects(state.projects, savedProjectIds) }));
+          }
+          showError(error);
+          return false;
+        }
       });
-      if (!succeeded) return false;
-      remember({
-        undo: () => desktop.reorderProjects(previousIds),
-        redo: () => desktop.reorderProjects(ids),
-      });
-      return true;
+      projectOrderWrite = write;
+      set({ projects });
+      try {
+        return await write;
+      } finally {
+        if (projectOrderWrite === write) projectOrderWrite = null;
+      }
     },
 
     async createFolder(draft) {
@@ -669,20 +724,42 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
     async createMeeting(draft) {
       return run(async () => {
         const created = await desktop.createMeeting(draft);
-        set((state) => ({
-          meetings: [
-            created,
-            ...state.meetings.map((meeting) => meeting.projectId === created.projectId
-              ? { ...meeting, position: meeting.position + 1 }
-              : meeting),
-          ],
-          segments: [],
-          segmentsLoading: false,
-          selectedMeetingId: created.id,
-          selectedProjectId: created.projectId,
-        }));
+        storeCreatedMeeting(created);
         return created;
       });
+    },
+
+    async pickMeetingMedia() {
+      try {
+        return await desktop.pickMeetingMedia();
+      } catch (error) {
+        showError(error, "media-import");
+        return null;
+      }
+    },
+
+    async importMeetingMedia(target, file) {
+      if (get().mediaImport) return false;
+      const meetingId = typeof target === "string" ? target : null;
+      const selectedAtStart = get().selectedMeetingId;
+      const projectAtStart = get().selectedProjectId;
+      set({ mediaImport: { meetingId, progress: null } });
+      try {
+        const meeting = await desktop.importMeetingMedia(target, file.path, (progress) => {
+          set({ mediaImport: { meetingId, progress } });
+        });
+        if (meetingId === null) {
+          const current = get();
+          storeCreatedMeeting(meeting, current.selectedMeetingId === selectedAtStart && current.selectedProjectId === projectAtStart);
+        } else storeMeeting(meeting);
+        if (speechReady()) void transcribe(meeting.id);
+        return true;
+      } catch (error) {
+        showError(error, "media-import");
+        return false;
+      } finally {
+        set({ mediaImport: null });
+      }
     },
 
     async renameMeeting(id, title) {
@@ -909,12 +986,13 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         storeSpeechModels(await desktop.downloadSpeechModels());
         return get().speechModels?.state === "ready";
       } catch (error) {
-        showError(error);
+        let status = get().speechModels;
         try {
-          storeSpeechModels(await desktop.speechModelsStatus());
+          status = await desktop.speechModelsStatus();
         } catch {
-          // The toast already explains the failure.
+          // The last snapshot still contains the installed models and resumable bytes.
         }
+        if (status) storeSpeechModels({ ...status, state: "failed", error: status.error || String(error) });
         return false;
       }
     },

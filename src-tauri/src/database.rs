@@ -1,9 +1,13 @@
-use std::{fs, io::Cursor, path::PathBuf};
+use std::{
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use image::{ImageFormat, ImageReader};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
 use crate::{
@@ -86,6 +90,18 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS meetings_project_idx ON meetings(project_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS pending_media_imports (
+                meeting_id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                session INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS import_transcription_boundaries (
+                meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+                session INTEGER NOT NULL,
+                offset_ms INTEGER NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS people (
                 id TEXT PRIMARY KEY,
@@ -656,13 +672,24 @@ impl Database {
     }
 
     pub fn create_meeting(&self, draft: MeetingDraft) -> AppResult<Meeting> {
-        let title = required_text(draft.title, "Meeting title")?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let meeting = Self::insert_meeting(&transaction, Uuid::new_v4().to_string(), draft)?;
+        transaction.commit()?;
+        Ok(meeting)
+    }
+
+    fn insert_meeting(
+        connection: &Connection,
+        id: String,
+        draft: MeetingDraft,
+    ) -> AppResult<Meeting> {
         let meeting = Meeting {
-            id: Uuid::new_v4().to_string(),
+            id,
             project_id: draft.project_id,
             folder_id: None,
             position: 0,
-            title,
+            title: required_text(draft.title, "Meeting title")?,
             status: "draft".to_string(),
             created_at: Utc::now().to_rfc3339(),
             started_at: None,
@@ -671,14 +698,12 @@ impl Database {
             audio_directory: None,
             error_message: None,
         };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
+        connection.execute(
             "UPDATE meetings SET position = position + 1
              WHERE project_id IS ?1 AND folder_id IS NULL AND deleted_at IS NULL",
             params![meeting.project_id],
         )?;
-        transaction.execute(
+        connection.execute(
             "INSERT INTO meetings(id, project_id, position, title, status, created_at, duration_ms)
              VALUES(?1, ?2, 0, ?3, ?4, ?5, 0)",
             params![
@@ -689,6 +714,120 @@ impl Database {
                 meeting.created_at
             ],
         )?;
+        Ok(meeting)
+    }
+
+    /// The writer holds the import lock until publication or rollback. A leftover row
+    /// on restart means SQLite never committed the new meeting metadata.
+    pub fn reserve_media_import(
+        &self,
+        id: &str,
+        new_meeting: bool,
+        directory: &Path,
+        next_session: impl FnOnce() -> AppResult<i64>,
+    ) -> AppResult<i64> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !new_meeting {
+            let status: String = transaction
+                .query_row(
+                    "SELECT status FROM meetings WHERE id = ?1 AND deleted_at IS NULL",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(AppError::NotFound("Meeting"))?;
+            if matches!(status.as_str(), "recording" | "processing") {
+                return Err(AppError::Validation(
+                    "Wait for recording or transcription to finish before importing.".into(),
+                ));
+            }
+        }
+        let session = next_session()?;
+        transaction.execute(
+            "INSERT INTO pending_media_imports(meeting_id, directory, session) VALUES(?1, ?2, ?3)",
+            params![id, directory.to_string_lossy(), session],
+        )?;
+        transaction.commit()?;
+        Ok(session)
+    }
+
+    pub fn pending_media_imports(&self) -> AppResult<Vec<(String, PathBuf, i64)>> {
+        let connection = self.connection()?;
+        let mut query = connection
+            .prepare("SELECT meeting_id, directory, session FROM pending_media_imports")?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+                row.get(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn clear_pending_media_import(&self, id: &str) -> AppResult<()> {
+        self.connection()?.execute(
+            "DELETE FROM pending_media_imports WHERE meeting_id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_media_import(
+        &self,
+        id: &str,
+        draft: Option<MeetingDraft>,
+        directory: &Path,
+        offset_ms: i64,
+        duration_ms: i64,
+        publish: impl FnOnce() -> AppResult<()>,
+    ) -> AppResult<Meeting> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(draft) = draft {
+            Self::insert_meeting(&transaction, id.to_owned(), draft)?;
+        }
+        // A successfully transcribed meeting can have no rows if the user
+        // deleted every line. Recovered recordings can also be ready but have
+        // never been transcribed. Only the former have speaker metadata.
+        let has_transcript_metadata = directory
+            .join(crate::voice_reference::METADATA_FILENAME)
+            .is_file();
+        transaction.execute(
+            "INSERT OR IGNORE INTO import_transcription_boundaries(meeting_id, session, offset_ms)
+             SELECT m.id, pending.session, ?2 FROM meetings m
+             JOIN pending_media_imports pending ON pending.meeting_id = m.id
+             WHERE m.id = ?1 AND ?2 > 0 AND (?3 OR EXISTS (
+                 SELECT 1 FROM transcript_segments WHERE meeting_id = m.id))",
+            params![id, offset_ms, has_transcript_metadata],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE meetings SET status = 'processing', started_at = COALESCE(started_at, ?1),
+                ended_at = ?1, duration_ms = ?2, audio_directory = ?3, error_message = NULL
+             WHERE id = ?4 AND deleted_at IS NULL AND status NOT IN ('recording', 'processing')",
+            params![
+                Utc::now().to_rfc3339(),
+                offset_ms + duration_ms,
+                directory.to_string_lossy(),
+                id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(AppError::Validation(
+                "The meeting changed during import. Try again.".into(),
+            ));
+        }
+        let meeting = transaction.query_row(
+            "SELECT id, project_id, folder_id, position, title, status, created_at, started_at, ended_at,
+                    duration_ms, audio_directory, error_message FROM meetings WHERE id = ?1",
+            [id], map_meeting,
+        )?;
+        transaction.execute(
+            "DELETE FROM pending_media_imports WHERE meeting_id = ?1",
+            [id],
+        )?;
+        publish()?;
         transaction.commit()?;
         Ok(meeting)
     }
@@ -752,10 +891,16 @@ impl Database {
     }
 
     pub fn delete_meeting(&self, id: &str) -> AppResult<()> {
-        self.connection()?.execute(
-            "UPDATE meetings SET deleted_at = ?1 WHERE id = ?2",
+        let changed = self.connection()?.execute(
+            "UPDATE meetings SET deleted_at = ?1 WHERE id = ?2
+             AND NOT EXISTS (SELECT 1 FROM pending_media_imports WHERE meeting_id = ?2)",
             params![Utc::now().to_rfc3339(), id],
         )?;
+        if changed == 0 {
+            return Err(AppError::Validation(
+                "This meeting is unavailable or importing media.".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1184,12 +1329,28 @@ impl Database {
         Ok(message)
     }
 
-    pub fn begin_recording(&self, id: &str, audio_directory: &str) -> AppResult<Meeting> {
-        self.connection()?.execute(
+    pub fn begin_recording(
+        &self,
+        id: &str,
+        audio_directory: &str,
+        start_capture: impl FnOnce() -> AppResult<()>,
+    ) -> AppResult<Meeting> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "UPDATE meetings SET status = 'recording', started_at = COALESCE(started_at, ?1), ended_at = NULL,
-                    audio_directory = ?2, error_message = NULL WHERE id = ?3",
+                    audio_directory = ?2, error_message = NULL WHERE id = ?3 AND deleted_at IS NULL
+                AND status NOT IN ('recording', 'processing')
+                AND NOT EXISTS (SELECT 1 FROM pending_media_imports WHERE meeting_id = ?3)",
             params![Utc::now().to_rfc3339(), audio_directory, id],
         )?;
+        if changed == 0 {
+            return Err(AppError::Validation(
+                "This meeting is unavailable or already in use.".into(),
+            ));
+        }
+        start_capture()?;
+        transaction.commit()?;
         self.meeting(id)
     }
 
@@ -1212,16 +1373,29 @@ impl Database {
     }
 
     pub fn mark_processing(&self, id: &str) -> AppResult<()> {
-        self.connection()?.execute(
-            "UPDATE meetings SET status = 'processing', error_message = NULL WHERE id = ?1",
+        let changed = self.connection()?.execute(
+            "UPDATE meetings SET status = 'processing', error_message = NULL
+             WHERE id = ?1 AND deleted_at IS NULL AND status != 'recording'
+             AND NOT EXISTS (SELECT 1 FROM pending_media_imports WHERE meeting_id = ?1)",
             [id],
         )?;
+        if changed == 0 {
+            return Err(AppError::Validation(
+                "This meeting is unavailable or already in use.".into(),
+            ));
+        }
         Ok(())
     }
 
     pub fn mark_ready(&self, id: &str) -> AppResult<Meeting> {
-        self.connection()?
-            .execute("UPDATE meetings SET status = 'ready' WHERE id = ?1", [id])?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("UPDATE meetings SET status = 'ready' WHERE id = ?1", [id])?;
+        transaction.execute(
+            "DELETE FROM import_transcription_boundaries WHERE meeting_id = ?1",
+            [id],
+        )?;
+        transaction.commit()?;
         self.meeting(id)
     }
 
@@ -1233,16 +1407,43 @@ impl Database {
         Ok(())
     }
 
+    pub fn import_transcription_boundary(&self, id: &str) -> AppResult<Option<(i64, i64)>> {
+        Ok(self.connection()?.query_row(
+            "SELECT session, offset_ms FROM import_transcription_boundaries WHERE meeting_id = ?1",
+            [id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
+    }
+
+    #[cfg(test)]
     pub fn replace_segments(
         &self,
         meeting_id: &str,
         segments: Vec<TranscriptSegment>,
     ) -> AppResult<()> {
+        self.store_transcription_segments(meeting_id, &segments, None)
+    }
+
+    pub fn store_transcription_segments(
+        &self,
+        meeting_id: &str,
+        segments: &[TranscriptSegment],
+        import_session: Option<i64>,
+    ) -> AppResult<()> {
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let boundary: Option<(i64, i64)> = transaction.query_row(
+            "SELECT session, offset_ms FROM import_transcription_boundaries WHERE meeting_id = ?1",
+            [meeting_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if boundary.map(|(session, _)| session) != import_session {
+            return Err(AppError::Validation(
+                "This meeting's audio changed during transcription.".into(),
+            ));
+        }
+        let offset = boundary.map(|(_, offset)| offset);
         transaction.execute(
-            "DELETE FROM transcript_segments WHERE meeting_id = ?1",
-            [meeting_id],
+            "DELETE FROM transcript_segments WHERE meeting_id = ?1 AND (?2 IS NULL OR start_ms >= ?2)",
+            params![meeting_id, offset],
         )?;
         for segment in segments {
             transaction.execute(
@@ -2083,13 +2284,17 @@ mod tests {
 
         let recording_path = directory.path().join("recordings");
         database
-            .begin_recording(&meeting.id, recording_path.to_str().expect("path"))
+            .begin_recording(&meeting.id, recording_path.to_str().expect("path"), || {
+                Ok(())
+            })
             .expect("begin recording");
         database
             .finish_recording(&meeting.id, 2_500)
             .expect("finish first recording");
         database
-            .begin_recording(&meeting.id, recording_path.to_str().expect("path"))
+            .begin_recording(&meeting.id, recording_path.to_str().expect("path"), || {
+                Ok(())
+            })
             .expect("begin another recording");
         let updated = database
             .finish_recording(&meeting.id, 1_500)
@@ -2110,7 +2315,9 @@ mod tests {
             .expect("meeting");
         let recording_path = directory.path().join("recordings");
         database
-            .begin_recording(&meeting.id, recording_path.to_str().expect("path"))
+            .begin_recording(&meeting.id, recording_path.to_str().expect("path"), || {
+                Ok(())
+            })
             .expect("begin recording");
 
         let recovered = database

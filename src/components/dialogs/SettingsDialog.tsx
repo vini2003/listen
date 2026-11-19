@@ -1,6 +1,6 @@
-import { useShallow } from "zustand/react/shallow";
-import { AudioWaveform, CheckCircle2, Eye, EyeOff, FileText, Fingerprint, LockKeyhole, MonitorSpeaker, Save, Sparkles, Trash2 } from "lucide-react";
+import { Eye, EyeOff, FileText, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useWorkspace } from "../../store/workspace";
 import { SpeechModelsPanel } from "../speech/SpeechModelsPanel";
 import { CustomSelect } from "../ui/CustomSelect";
@@ -15,37 +15,39 @@ interface SettingsDialogProps {
 }
 
 export function SettingsDialog({ open, onClose, initialSection }: SettingsDialogProps) {
-  const { settings, devices, people, speechModels, updateSettings, eraseAllVoiceProfiles, setApiKey, openDiagnostics, busy } = useWorkspace(useShallow((state) => ({
+  const { settings, devices, people, updateSettings, eraseAllVoiceProfiles, setApiKey, openDiagnostics, busy } = useWorkspace(useShallow((state) => ({
     settings: state.settings,
     devices: state.devices,
     people: state.people,
-    speechModels: state.speechModels,
     updateSettings: state.updateSettings,
     eraseAllVoiceProfiles: state.eraseAllVoiceProfiles,
     setApiKey: state.setApiKey,
     openDiagnostics: state.openDiagnostics,
     busy: state.busy,
   })));
-  const modelsReady = speechModels?.state === "ready";
   const [openAiKey, setOpenAiKey] = useState("");
   const [showOpenAiKey, setShowOpenAiKey] = useState(false);
   const [eraseProfilesConfirmOpen, setEraseProfilesConfirmOpen] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const openAiInputRef = useRef<HTMLInputElement>(null);
   const initialFocus = initialSection === "text-model" ? openAiInputRef : undefined;
+  const localSpeaker = people.find((person) => person.id === settings.localSpeakerPersonId);
+  const hasFingerprints = people.some((person) => person.voiceProfile && person.voiceProfile.status !== "disabled");
   const microphoneOptions = [
-    { value: "", label: "No microphone", description: "Record the speaker only" },
+    { value: "", label: "Off" },
     ...devices.filter((device) => device.kind === "microphone").map((device) => ({ value: device.id, label: device.name, description: device.subtitle || (device.isDefault ? "System default" : undefined) })),
   ];
   const systemOptions = [
-    { value: "", label: "No speaker", description: "Record the microphone only" },
+    { value: "", label: "Off" },
     ...devices.filter((device) => device.kind === "system").map((device) => ({ value: device.id, label: device.name, description: device.subtitle || (device.isDefault ? "System default" : undefined) })),
   ];
 
   useEffect(() => {
-    if (!open) return;
-    setOpenAiKey("");
-    setShowOpenAiKey(false);
+    if (!open) {
+      setOpenAiKey("");
+      setShowOpenAiKey(false);
+      setEraseProfilesConfirmOpen(false);
+    }
   }, [open]);
 
   useEffect(() => {
@@ -53,84 +55,117 @@ export function SettingsDialog({ open, onClose, initialSection }: SettingsDialog
     const frame = window.requestAnimationFrame(() => {
       contentRef.current
         ?.querySelector(`[data-settings-section="${initialSection}"]`)
-        ?.scrollIntoView({ block: "start", behavior: "smooth" });
+        ?.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [open, initialSection]);
 
   async function saveOpenAiKey(event: FormEvent): Promise<void> {
     event.preventDefault();
-    if (await setApiKey(openAiKey.trim())) setOpenAiKey("");
+    if (await setApiKey(openAiKey.trim())) {
+      setOpenAiKey("");
+      setShowOpenAiKey(false);
+    }
   }
 
   return (
     <>
-    <Modal open={open} title="Settings" description="Capture, speech models and appearance." onClose={onClose} size="large" initialFocus={initialFocus}>
-      <div className="settings-content" ref={contentRef}>
-        <section className="settings-section" data-settings-section="transcription">
-          <div className="settings-section-icon"><AudioWaveform size={18} /></div>
-          <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Speech models</h3><p>Transcription, speaker separation and voice matching run on this computer. Recordings never leave it.</p></div>{modelsReady ? <span className="configured-badge"><CheckCircle2 size={14} /> Ready</span> : null}</div>
+      <Modal open={open} title="Settings" onClose={onClose} initialFocus={initialFocus}>
+        <div className="settings-content" ref={contentRef}>
+          <section className="settings-section" data-settings-section="transcription" aria-labelledby="settings-models">
+            <h3 id="settings-models">Models</h3>
             <SpeechModelsPanel />
-          </div>
-        </section>
+          </section>
 
-        <section className="settings-section" data-settings-section="voice">
-          <div className="settings-section-icon"><Fingerprint size={18} /></div>
-          <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Voice identification</h3><p>Learns each labeled person's voice and names them automatically in future recordings. Uncertain speakers stay unknown.</p></div>{modelsReady ? <span className="configured-badge"><CheckCircle2 size={14} /> Active</span> : null}</div>
-            <div className="voice-settings-actions">
-              {settings.localSpeakerPersonId ? <label className="settings-toggle"><input type="checkbox" checked={settings.preferLocalSpeakerForMicrophone} onChange={(event) => void updateSettings({ ...settings, preferLocalSpeakerForMicrophone: event.target.checked })} /><span>Prefer {people.find((person) => person.id === settings.localSpeakerPersonId)?.fullName || "my profile"} for clear microphone-only speech</span></label> : <p className="voice-owner-hint">{modelsReady ? "Choose “This is me” for your profile in People to identify clear microphone-only speech." : "Uses the speech models above."}</p>}
-              <button className="danger-text-button" type="button" onClick={() => setEraseProfilesConfirmOpen(true)}><Trash2 size={15} /> Erase all voice profiles</button>
-            </div>
-          </div>
-        </section>
+          <section className="settings-section" data-settings-section="voice" aria-labelledby="settings-fingerprinting">
+            <h3 id="settings-fingerprinting">Fingerprinting</h3>
+            <p>Learns each person's voice and automatically labels them in recordings.</p>
+            {localSpeaker || hasFingerprints ? (
+              <div className="voice-settings-actions">
+                {localSpeaker ? (
+                  <label className="settings-toggle">
+                    <input type="checkbox" checked={settings.preferLocalSpeakerForMicrophone} onChange={(event) => void updateSettings({ ...settings, preferLocalSpeakerForMicrophone: event.target.checked })} />
+                    <span>Prefer {localSpeaker.fullName} for microphone-only speech</span>
+                  </label>
+                ) : null}
+                {hasFingerprints ? (
+                  <button className="danger-text-button" type="button" onClick={() => setEraseProfilesConfirmOpen(true)}>
+                    <Trash2 size={14} /> Erase fingerprints
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
 
-        <section className="settings-section" data-settings-section="text-model">
-          <div className="settings-section-icon"><Sparkles size={18} /></div>
-          <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Text model <small>Optional</small></h3><p>Polishes transcript wording and answers questions about your meetings. Uses OpenAI, so transcript text is sent to it when enabled.</p></div>{settings.apiKeyConfigured ? <span className="configured-badge"><CheckCircle2 size={14} /> Configured</span> : null}</div>
+          <section className="settings-section" data-settings-section="text-model" aria-labelledby="settings-chat">
+            <h3 id="settings-chat">Chat</h3>
+            <p>Powers the chat window and polishes meeting transcripts.</p>
             <form className="api-key-form" onSubmit={(event) => void saveOpenAiKey(event)}>
-              <div className="secret-input"><LockKeyhole size={16} /><input ref={openAiInputRef} aria-label="OpenAI API key" autoComplete="off" type={showOpenAiKey ? "text" : "password"} value={openAiKey} onChange={(event) => setOpenAiKey(event.target.value)} placeholder={settings.apiKeyConfigured ? "Replace OpenAI key" : "sk-…"} /><button type="button" onClick={() => setShowOpenAiKey((show) => !show)} aria-label={showOpenAiKey ? "Hide key" : "Show key"}>{showOpenAiKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
-              <button className="secondary-button" disabled={!openAiKey.trim() || busy}><Save size={15} /> Save key</button>
+              <div className="secret-input">
+                <input
+                  ref={openAiInputRef}
+                  aria-label={settings.apiKeyConfigured ? "Replace OpenAI API key" : "OpenAI API key"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  type={showOpenAiKey ? "text" : "password"}
+                  value={openAiKey}
+                  onChange={(event) => setOpenAiKey(event.target.value)}
+                  placeholder={settings.apiKeyConfigured ? "Replace saved OpenAI API key" : "OpenAI API key"}
+                />
+                <button type="button" onClick={() => setShowOpenAiKey((show) => !show)} aria-label={showOpenAiKey ? "Hide key" : "Show key"} title={showOpenAiKey ? "Hide key" : "Show key"}>
+                  {showOpenAiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <button className="secondary-button" disabled={!openAiKey.trim() || busy}>Save key</button>
             </form>
-          </div>
-        </section>
+            {openAiKey.trim() && !settings.apiKeyConfigured ? <small className="key-sharing-note">Chat and polishing send transcript text to OpenAI.</small> : null}
+          </section>
 
-        <section className="settings-section" data-settings-section="capture">
-          <div className="settings-section-icon"><MonitorSpeaker size={18} /></div>
-          <div className="settings-section-body">
-            <div className="settings-heading"><div><h3>Default capture</h3></div></div>
+          <section className="settings-section" data-settings-section="capture" aria-labelledby="settings-recording">
+            <h3 id="settings-recording">Recording defaults</h3>
             <div className="settings-grid">
-              <label><span>Microphone</span><CustomSelect ariaLabel="Microphone" maxVisibleOptions={4} value={settings.microphoneDeviceId ?? ""} options={microphoneOptions} onChange={(value) => void updateSettings({ ...settings, microphoneDeviceId: value || null })} /></label>
-              <label><span>Speaker</span><CustomSelect ariaLabel="Speaker" maxVisibleOptions={4} value={settings.systemDeviceId ?? ""} options={systemOptions} onChange={(value) => void updateSettings({ ...settings, systemDeviceId: value || null })} /></label>
+              <label>
+                <span>Microphone</span>
+                <CustomSelect ariaLabel="Microphone" maxVisibleOptions={4}
+                  value={settings.captureMicrophone ? settings.microphoneDeviceId || microphoneOptions[1]?.value || "" : ""}
+                  options={microphoneOptions}
+                  onChange={(value) => void updateSettings({ ...settings, captureMicrophone: Boolean(value), microphoneDeviceId: value || settings.microphoneDeviceId })}
+                />
+              </label>
+              <label>
+                <span>System audio</span>
+                <CustomSelect ariaLabel="System audio" maxVisibleOptions={4}
+                  value={settings.captureSystem ? settings.systemDeviceId || systemOptions[1]?.value || "" : ""}
+                  options={systemOptions}
+                  onChange={(value) => void updateSettings({ ...settings, captureSystem: Boolean(value), systemDeviceId: value || settings.systemDeviceId })}
+                />
+              </label>
             </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="settings-section compact-settings" data-settings-section="appearance">
-          <div className="settings-section-body full-width">
-            <div className="settings-heading"><div><h3>Appearance</h3></div><div className="theme-select"><CustomSelect compact ariaLabel="Appearance" value={settings.theme} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} onChange={(value) => void updateSettings({ ...settings, theme: value as "light" | "dark" | "system" })} /></div></div>
-          </div>
-        </section>
+          <section className="settings-section settings-row" data-settings-section="appearance" aria-labelledby="settings-appearance">
+            <h3 id="settings-appearance">Appearance</h3>
+            <div className="theme-select">
+              <CustomSelect compact ariaLabel="Appearance" value={settings.theme} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} onChange={(value) => void updateSettings({ ...settings, theme: value as "light" | "dark" | "system" })} />
+            </div>
+          </section>
 
-        <section className="settings-section compact-settings" data-settings-section="diagnostics">
-          <div className="settings-section-body full-width diagnostics-setting">
-            <div className="settings-heading"><div><h3>Diagnostics</h3></div><button className="secondary-button" type="button" onClick={() => void openDiagnostics()}><FileText size={15} /> Open log</button></div>
-          </div>
-        </section>
-      </div>
-    </Modal>
-
-    <Modal open={eraseProfilesConfirmOpen} title="Erase all voice profiles?" onClose={() => setEraseProfilesConfirmOpen(false)} size="small">
-      <div className="confirmation-content">
-        <p>Every stored voice profile is <strong>permanently deleted</strong> and automatic labeling is turned off for each of these people. Names, recordings, and transcripts remain.</p>
-        <div className="dialog-actions">
-          <button autoFocus className="secondary-button" onClick={() => setEraseProfilesConfirmOpen(false)}>Cancel</button>
-          <button className="danger-button" disabled={busy} onClick={() => void eraseAllVoiceProfiles().then((succeeded) => { if (succeeded) setEraseProfilesConfirmOpen(false); })}><Trash2 size={15} /> Erase all profiles</button>
+          <section className="settings-section settings-row" data-settings-section="diagnostics" aria-labelledby="settings-diagnostics">
+            <h3 id="settings-diagnostics">Diagnostics</h3>
+            <button className="secondary-button" type="button" onClick={() => void openDiagnostics()}><FileText size={15} /> Open log</button>
+          </section>
         </div>
-      </div>
-    </Modal>
+      </Modal>
+
+      <Modal open={eraseProfilesConfirmOpen} title="Erase all fingerprints?" onClose={() => setEraseProfilesConfirmOpen(false)} size="small">
+        <div className="confirmation-content">
+          <p>This permanently erases saved fingerprints and turns off automatic labeling for those people.</p>
+          <div className="dialog-actions">
+            <button autoFocus className="secondary-button" onClick={() => setEraseProfilesConfirmOpen(false)}>Cancel</button>
+            <button className="danger-button" disabled={busy} onClick={() => void eraseAllVoiceProfiles().then((succeeded) => { if (succeeded) setEraseProfilesConfirmOpen(false); })}>Erase fingerprints</button>
+          </div>
+        </div>
+      </Modal>
     </>
   );
 }

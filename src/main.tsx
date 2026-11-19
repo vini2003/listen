@@ -4,13 +4,14 @@ import { MotionConfig } from "framer-motion";
 import "@fontsource-variable/inter";
 import App from "./App";
 import { AssistantWindow } from "./components/assistant/AssistantWindow";
+import { WorkspaceStartup } from "./components/speech/WorkspaceStartup";
 import "./styles.css";
 
 const query = new URLSearchParams(window.location.search);
 const assistantView = query.get("view") === "assistant";
 const content = assistantView
   ? <AssistantWindow initialMeetingId={query.get("meetingId")} />
-  : <App />;
+  : <WorkspaceStartup><App /></WorkspaceStartup>;
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

@@ -1,55 +1,51 @@
 import { AnimatePresence, motion } from "framer-motion";
 import type { ReactNode } from "react";
-import { AudioLines, Download, Fingerprint, X } from "lucide-react";
+import { AudioLines, FileInput, Fingerprint } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
-import { downloadFraction, formatBytes, isDownloading, phaseLabel } from "../../lib/speechModels";
+import { phaseLabel } from "../../lib/speechModels";
 import { useWorkspace } from "../../store/workspace";
 import { ProgressBar } from "../speech/SpeechModelsPanel";
-
-interface ActivityTrayProps {
-  onOpenSpeechSettings: () => void;
-}
 
 /**
  * Everything Listen is doing in the background, pinned above the sidebar
  * footer so long jobs stay visible from any screen. Hidden when idle.
  */
-export function ActivityTray({ onOpenSpeechSettings }: ActivityTrayProps) {
-  const { speechModels, progress, meetings, voiceLearning, people, selectMeeting, cancelSpeechModelsDownload } = useWorkspace(useShallow((state) => ({
-    speechModels: state.speechModels,
+export function ActivityTray() {
+  const { progress, backgroundImport, meetings, voiceLearning, people, selectMeeting } = useWorkspace(useShallow((state) => ({
     progress: state.transcriptionProgress,
+    backgroundImport: state.mediaImport && (state.mediaImport.meetingId === null || state.mediaImport.meetingId !== state.selectedMeetingId) ? state.mediaImport : null,
     meetings: state.meetings,
     voiceLearning: state.voiceLearning,
     people: state.people,
     selectMeeting: state.selectMeeting,
-    cancelSpeechModelsDownload: state.cancelSpeechModelsDownload,
   })));
 
   const jobs = Object.values(progress);
   const active = jobs.find((job) => job.phase !== "queued") ?? null;
   const waiting = jobs.filter((job) => job !== active);
   const activeMeeting = active ? meetings.find((meeting) => meeting.id === active.meetingId) : null;
-  const downloading = speechModels !== null && isDownloading(speechModels);
   const firstVoice = people.find((person) => person.id === voiceLearning[0]);
   const voiceName = firstVoice?.nickname || firstVoice?.fullName.split(/\s+/)[0];
+  const importingMeeting = backgroundImport && meetings.find((meeting) => meeting.id === backgroundImport.meetingId);
+  const ImportTarget = importingMeeting ? "button" : "div";
 
   return (
     <div className="activity-tray" aria-live="polite">
       <AnimatePresence initial={false}>
-        {downloading && speechModels ? (
-          <ActivityItem key="download">
-            <button type="button" className="activity-main" onClick={onOpenSpeechSettings} title="Open speech model settings">
-              <span className="activity-icon"><Download size={14} /></span>
+        {backgroundImport ? (
+          <ActivityItem key="import">
+            <ImportTarget className="activity-main" onClick={importingMeeting ? () => selectMeeting(importingMeeting.id) : undefined}>
+              <span className="activity-icon"><FileInput size={14} /></span>
               <span className="activity-copy">
-                <strong>{speechModels.state === "verifying" ? "Checking models" : "Downloading models"}</strong>
-                <small>{formatBytes(speechModels.downloadedBytes)} of {formatBytes(speechModels.totalBytes)} · {Math.floor(downloadFraction(speechModels) * 100)}%</small>
+                <strong>{importingMeeting ? `Importing into ${importingMeeting.title}` : "Importing file"}</strong>
+                {backgroundImport.progress !== null && <small>{Math.floor(backgroundImport.progress * 100)}%</small>}
               </span>
-            </button>
-            <button type="button" className="activity-dismiss" onClick={() => void cancelSpeechModelsDownload()} aria-label="Cancel download" title="Cancel download"><X size={13} /></button>
-            <ProgressBar fraction={downloadFraction(speechModels)} label="Speech model download" />
+            </ImportTarget>
+            {backgroundImport.progress !== null ? <ProgressBar fraction={backgroundImport.progress} label="File import progress" /> : (
+              <div className="progress-track indeterminate" role="progressbar" aria-label="File import progress"><span className="progress-fill" /></div>
+            )}
           </ActivityItem>
         ) : null}
-
         {active || waiting.length > 0 ? (
           <ActivityItem key="transcription">
             <button
@@ -77,7 +73,7 @@ export function ActivityTray({ onOpenSpeechSettings }: ActivityTrayProps) {
               <span className="activity-icon"><Fingerprint size={14} /></span>
               <span className="activity-copy">
                 <strong>{voiceLearning.length === 1 && voiceName ? `Learning ${voiceName}'s voice` : `Learning ${voiceLearning.length} voices`}</strong>
-                <small>{jobs.length > 0 ? "Starts after transcription" : voiceLearning.length > 1 && voiceName ? `${voiceName} now, then ${voiceLearning.length - 1} more` : "Usually under a minute"}</small>
+                {jobs.length > 0 ? <small>Queued after transcription</small> : null}
               </span>
             </div>
             <div className="progress-track indeterminate" role="progressbar" aria-label="Voice learning" aria-busy="true"><span className="progress-fill" /></div>

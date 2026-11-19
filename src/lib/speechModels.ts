@@ -7,10 +7,6 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function downloadFraction(status: SpeechModelsStatus): number {
-  return status.totalBytes > 0 ? Math.min(1, status.downloadedBytes / status.totalBytes) : 0;
-}
-
 export function isDownloading(status: SpeechModelsStatus | null): boolean {
   return status?.state === "downloading" || status?.state === "verifying";
 }

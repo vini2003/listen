@@ -8,13 +8,14 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
+use futures_util::future::join_all;
 use parking_lot::Mutex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::{AppError, AppResult},
@@ -44,7 +45,7 @@ const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: DIARIZER,
         name: "Nemotron 3 Diarization",
-        role: "Separates who is speaking",
+        role: "Speaker separation",
         licence: "NVIDIA OpenMDW 1.1",
         files: &[
             ModelFile {
@@ -64,7 +65,7 @@ const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: RECOGNIZER,
         name: "Parakeet TDT 0.6B v3",
-        role: "Turns speech into text",
+        role: "Transcription",
         licence: "CC BY 4.0",
         files: &[
             ModelFile {
@@ -96,7 +97,7 @@ const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: EMBEDDER,
         name: "WeSpeaker ResNet34-LM",
-        role: "Recognises saved voices",
+        role: "Fingerprinting",
         licence: "CC BY 4.0",
         files: &[ModelFile {
             name: "voxceleb_resnet34_LM.onnx",
@@ -129,6 +130,8 @@ pub struct ModelStatus {
     pub role: &'static str,
     pub licence: &'static str,
     pub size_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub state: InstallState,
     pub installed: bool,
 }
 
@@ -143,15 +146,16 @@ pub struct SpeechModelsStatus {
 }
 
 struct Activity {
-    state: InstallState,
-    downloaded_bytes: u64,
+    download: Option<CancellationToken>,
+    models: [InstallState; MODELS.len()],
+    // Windows may cache a file's reported length until its writer closes.
+    transfers: [Option<(&'static str, u64)>; MODELS.len()],
     error: Option<String>,
 }
 
 pub struct SpeechModels {
     root: PathBuf,
     activity: Mutex<Activity>,
-    cancel: AtomicBool,
 }
 
 impl SpeechModels {
@@ -159,39 +163,68 @@ impl SpeechModels {
         Self {
             root,
             activity: Mutex::new(Activity {
-                state: InstallState::Missing,
-                downloaded_bytes: 0,
+                download: None,
+                models: [InstallState::Missing; MODELS.len()],
+                transfers: [None; MODELS.len()],
                 error: None,
             }),
-            cancel: AtomicBool::new(false),
         }
     }
 
     pub fn status(&self) -> SpeechModelsStatus {
-        let models = MODELS
-            .iter()
-            .map(|model| ModelStatus {
-                id: model.id,
-                name: model.name,
-                role: model.role,
-                licence: model.licence,
-                size_bytes: model.files.iter().map(|file| file.bytes).sum(),
-                installed: self.is_installed(model),
-            })
-            .collect::<Vec<_>>();
-        let total_bytes = models.iter().map(|model| model.size_bytes).sum();
-        let installed_bytes = models
-            .iter()
-            .filter(|model| model.installed)
-            .map(|model| model.size_bytes)
-            .sum();
         let activity = self.activity.lock();
-        let busy = matches!(
-            activity.state,
-            InstallState::Downloading | InstallState::Verifying
-        );
-        let state = if busy {
-            activity.state
+        let models: Vec<_> = MODELS
+            .iter()
+            .enumerate()
+            .map(|(index, model)| {
+                let directory = self.root.join(model.id);
+                let mut installed = true;
+                let mut downloaded_bytes = 0;
+                for file in model.files {
+                    if installed_file(&directory.join(file.name), file) {
+                        downloaded_bytes += file.bytes;
+                    } else {
+                        installed = false;
+                        if let Some((name, bytes)) = activity.transfers[index] {
+                            if name == file.name {
+                                downloaded_bytes += bytes;
+                                continue;
+                            }
+                        }
+                        let partial = directory.join(format!("{}.part", file.name));
+                        if let Ok(metadata) = fs::metadata(partial) {
+                            if metadata.len() <= file.bytes {
+                                downloaded_bytes += metadata.len();
+                            }
+                        }
+                    }
+                }
+                ModelStatus {
+                    id: model.id,
+                    name: model.name,
+                    role: model.role,
+                    licence: model.licence,
+                    size_bytes: model.files.iter().map(|file| file.bytes).sum(),
+                    downloaded_bytes,
+                    installed,
+                    state: if installed {
+                        InstallState::Ready
+                    } else {
+                        activity.models[index]
+                    },
+                }
+            })
+            .collect();
+        let total_bytes = models.iter().map(|model| model.size_bytes).sum();
+        let state = if activity.download.is_some() {
+            if models
+                .iter()
+                .any(|model| model.state == InstallState::Downloading)
+            {
+                InstallState::Downloading
+            } else {
+                InstallState::Verifying
+            }
         } else if models.iter().all(|model| model.installed) {
             InstallState::Ready
         } else if activity.error.is_some() {
@@ -201,11 +234,7 @@ impl SpeechModels {
         };
         SpeechModelsStatus {
             state,
-            downloaded_bytes: if busy {
-                activity.downloaded_bytes
-            } else {
-                installed_bytes
-            },
+            downloaded_bytes: models.iter().map(|model| model.downloaded_bytes).sum(),
             total_bytes,
             error: activity.error.clone(),
             models,
@@ -216,7 +245,7 @@ impl SpeechModels {
     pub fn paths(&self) -> AppResult<ModelPaths> {
         if !MODELS.iter().all(|model| self.is_installed(model)) {
             return Err(AppError::Validation(
-                "Download the speech models in Settings before transcribing".to_string(),
+                "Finish downloading the models before transcribing".to_string(),
             ));
         }
         Ok(ModelPaths {
@@ -233,59 +262,65 @@ impl SpeechModels {
             .ok_or(AppError::NotFound("Voice matching model"))?;
         if !self.is_installed(model) {
             return Err(AppError::Validation(
-                "Download the speech models in Settings to learn voices".to_string(),
+                "Finish downloading the models to learn voices".to_string(),
             ));
         }
         Ok(self.root.join(EMBEDDER).join(model.files[0].name))
     }
 
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(token) = &self.activity.lock().download {
+            token.cancel();
+        }
     }
 
     /// Deletes every model file. The caller makes sure no job is using them.
     pub fn remove(&self) -> AppResult<()> {
-        let activity = self.activity.lock();
-        if matches!(
-            activity.state,
-            InstallState::Downloading | InstallState::Verifying
-        ) {
+        let mut activity = self.activity.lock();
+        if activity.download.is_some() {
             return Err(AppError::Validation(
                 "Cancel the download before removing the speech models".to_string(),
             ));
         }
-        drop(activity);
         match fs::remove_dir_all(&self.root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        self.activity.lock().error = None;
+        activity.error = None;
+        activity.models.fill(InstallState::Missing);
         Ok(())
     }
 
     /// Downloads whatever is missing. Partial files survive a cancel, a crash
     /// or a dropped connection and resume where they stopped.
     pub async fn download(&self, notify: impl Fn(SpeechModelsStatus)) -> AppResult<()> {
+        let cancellation = CancellationToken::new();
         {
             let mut activity = self.activity.lock();
-            if matches!(
-                activity.state,
-                InstallState::Downloading | InstallState::Verifying
-            ) {
+            if activity.download.is_some() {
                 return Ok(());
             }
-            activity.state = InstallState::Downloading;
+            activity.download = Some(cancellation.clone());
             activity.error = None;
-            activity.downloaded_bytes = 0;
+            activity.models.fill(InstallState::Downloading);
         }
-        self.cancel.store(false, Ordering::SeqCst);
         notify(self.status());
 
-        let result = self.download_missing(&notify).await;
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(Failure::Cancelled),
+            result = self.download_missing(&notify) => result,
+        };
         {
             let mut activity = self.activity.lock();
-            activity.state = InstallState::Missing;
+            activity.download = None;
+            activity.transfers.fill(None);
+            for state in &mut activity.models {
+                if *state != InstallState::Failed {
+                    *state = InstallState::Missing;
+                }
+            }
             activity.error = match &result {
                 Err(Failure::Retry(message)) => Some(message.clone()),
                 Err(Failure::Fatal(error)) => Some(error.to_string()),
@@ -306,31 +341,50 @@ impl SpeechModels {
             .user_agent(concat!("Listen/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| Failure::Retry(format!("Could not start the download: {error}")))?;
-        let mut completed = 0u64;
-        for model in MODELS {
-            let directory = self.root.join(model.id);
-            fs::create_dir_all(&directory)?;
-            for file in model.files {
-                let target = directory.join(file.name);
-                if installed_file(&target, file) {
-                    completed += file.bytes;
-                    continue;
-                }
-                let mut attempt = 0;
-                loop {
-                    match self
-                        .download_file(&client, file, &target, completed, notify)
-                        .await
-                    {
-                        Ok(()) => break,
-                        Err(Failure::Retry(_)) if attempt + 1 < ATTEMPTS => {
-                            attempt += 1;
-                            tokio::time::sleep(Duration::from_secs(2u64.pow(attempt as u32))).await;
-                        }
-                        Err(failure) => return Err(failure),
+        // One independent transfer per model. A failed transfer leaves the others running.
+        let transfers = MODELS.iter().enumerate().map(|(index, model)| {
+            let client = &client;
+            async move {
+                let result = self.download_model(client, index, model, notify).await;
+                self.activity.lock().models[index] = match &result {
+                    Ok(()) => InstallState::Ready,
+                    Err(Failure::Cancelled) => InstallState::Missing,
+                    Err(_) => InstallState::Failed,
+                };
+                notify(self.status());
+                result
+            }
+        });
+        join_all(transfers).await.into_iter().collect()
+    }
+
+    async fn download_model(
+        &self,
+        client: &reqwest::Client,
+        index: usize,
+        model: &ModelSpec,
+        notify: &impl Fn(SpeechModelsStatus),
+    ) -> Result<(), Failure> {
+        let directory = self.root.join(model.id);
+        fs::create_dir_all(&directory)?;
+        for file in model.files {
+            let target = directory.join(file.name);
+            if installed_file(&target, file) {
+                continue;
+            }
+            for attempt in 1..=ATTEMPTS {
+                self.activity.lock().models[index] = InstallState::Downloading;
+                let result = self
+                    .download_file(client, file, &target, index, notify)
+                    .await;
+                self.activity.lock().transfers[index] = None;
+                match result {
+                    Ok(()) => break,
+                    Err(Failure::Retry(_)) if attempt < ATTEMPTS => {
+                        tokio::time::sleep(Duration::from_secs(2u64.pow(attempt as u32))).await;
                     }
+                    Err(failure) => return Err(failure),
                 }
-                completed += file.bytes;
             }
         }
         Ok(())
@@ -341,18 +395,27 @@ impl SpeechModels {
         client: &reqwest::Client,
         file: &ModelFile,
         target: &Path,
-        completed_before: u64,
+        index: usize,
         notify: &impl Fn(SpeechModelsStatus),
     ) -> Result<(), Failure> {
         let partial = target.with_file_name(format!("{}.part", file.name));
         let mut hasher = Sha256::new();
         let mut written = existing_partial(&partial, file.bytes, &mut hasher)?;
 
+        if written == file.bytes {
+            self.activity.lock().models[index] = InstallState::Verifying;
+            notify(self.status());
+            return finish_file(file, &partial, target, hasher);
+        }
+
         let mut request = client.get(file.url);
         if written > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={written}-"));
         }
-        let mut response = request.send().await.map_err(network_failure)?;
+        let mut response = tokio::time::timeout(STALL_TIMEOUT, request.send())
+            .await
+            .map_err(|_| Failure::Retry("The connection timed out".to_string()))?
+            .map_err(network_failure)?;
         let status = response.status();
         let mut output = if written > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT {
             fs::OpenOptions::new().append(true).open(&partial)?
@@ -377,12 +440,9 @@ impl SpeechModels {
             ))));
         };
 
+        self.activity.lock().transfers[index] = Some((file.name, written));
         let mut last_notice = Instant::now();
         loop {
-            if self.cancel.load(Ordering::SeqCst) {
-                output.flush()?;
-                return Err(Failure::Cancelled);
-            }
             let chunk = tokio::time::timeout(STALL_TIMEOUT, response.chunk())
                 .await
                 .map_err(|_| Failure::Retry("The connection stalled".to_string()))?
@@ -403,7 +463,7 @@ impl SpeechModels {
             output.write_all(&chunk)?;
             if last_notice.elapsed() >= PROGRESS_INTERVAL {
                 last_notice = Instant::now();
-                self.activity.lock().downloaded_bytes = completed_before + written;
+                self.activity.lock().transfers[index] = Some((file.name, written));
                 notify(self.status());
             }
         }
@@ -413,21 +473,13 @@ impl SpeechModels {
             return Err(Failure::Retry(format!("{} ended early", file.name)));
         }
 
-        self.activity.lock().state = InstallState::Verifying;
-        notify(self.status());
-        let digest = format!("{:x}", hasher.finalize());
-        self.activity.lock().state = InstallState::Downloading;
-        if digest != file.sha256 {
-            let _ = fs::remove_file(&partial);
-            return Err(Failure::Retry(format!(
-                "{} failed its integrity check and was discarded",
-                file.name
-            )));
+        {
+            let mut activity = self.activity.lock();
+            activity.models[index] = InstallState::Verifying;
+            activity.transfers[index] = Some((file.name, written));
         }
-        fs::rename(&partial, target)?;
-        self.activity.lock().downloaded_bytes = completed_before + file.bytes;
         notify(self.status());
-        Ok(())
+        finish_file(file, &partial, target, hasher)
     }
 
     fn is_installed(&self, model: &ModelSpec) -> bool {
@@ -458,7 +510,24 @@ impl From<AppError> for Failure {
 }
 
 fn installed_file(path: &Path, file: &ModelFile) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.len() == file.bytes)
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.bytes)
+}
+
+fn finish_file(
+    file: &ModelFile,
+    partial: &Path,
+    target: &Path,
+    hash: Sha256,
+) -> Result<(), Failure> {
+    if format!("{:x}", hash.finalize()) != file.sha256 {
+        fs::remove_file(partial)?;
+        return Err(Failure::Retry(format!(
+            "{} failed its integrity check and was discarded",
+            file.name
+        )));
+    }
+    fs::rename(partial, target)?;
+    Ok(())
 }
 
 /// Bytes already on disk from an interrupted download, fed into the hasher.
@@ -466,7 +535,7 @@ fn existing_partial(path: &Path, expected: u64, hasher: &mut Sha256) -> AppResul
     let Ok(mut input) = File::open(path) else {
         return Ok(0);
     };
-    if input.metadata()?.len() >= expected {
+    if input.metadata()?.len() > expected {
         drop(input);
         fs::remove_file(path)?;
         return Ok(0);
@@ -484,7 +553,10 @@ fn existing_partial(path: &Path, expected: u64, hasher: &mut Sha256) -> AppResul
 }
 
 fn network_failure(error: reqwest::Error) -> Failure {
-    Failure::Retry(format!("Could not reach Hugging Face: {error}"))
+    Failure::Retry(format!(
+        "Could not reach Hugging Face: {}",
+        error.without_url()
+    ))
 }
 
 #[cfg(test)]
@@ -535,6 +607,58 @@ mod tests {
     }
 
     #[test]
+    fn counts_resumable_bytes_per_model_after_relaunch() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        for (index, model) in MODELS.iter().enumerate() {
+            let folder = directory.path().join(model.id);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(
+                folder.join(format!("{}.part", model.files[0].name)),
+                vec![1; index + 1],
+            )
+            .unwrap();
+        }
+        let models = SpeechModels::new(directory.path().to_owned());
+        let status = models.status();
+        assert_eq!(status.state, InstallState::Missing);
+        assert_eq!(status.downloaded_bytes, 6);
+        for (index, model) in status.models.iter().enumerate() {
+            assert_eq!(model.downloaded_bytes, index as u64 + 1);
+            assert_eq!(model.state, InstallState::Missing);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads 1.1 GB from Hugging Face into a temporary directory"]
+    async fn installs_pinned_models_concurrently_and_resumes() {
+        let directory = tempfile::tempdir().unwrap();
+        let models = SpeechModels::new(directory.path().to_owned());
+        models
+            .download(|status| {
+                let active = status
+                    .models
+                    .iter()
+                    .filter(|model| !model.installed && model.downloaded_bytes > 0)
+                    .count();
+                if active >= 2 {
+                    models.cancel();
+                }
+            })
+            .await
+            .unwrap();
+        let resumed = SpeechModels::new(directory.path().to_owned());
+        let partial = resumed.status();
+        assert_eq!(partial.state, InstallState::Missing);
+        assert!(partial.downloaded_bytes > 0);
+        resumed.download(|_| {}).await.unwrap();
+        let complete = SpeechModels::new(directory.path().to_owned());
+        let status = complete.status();
+        assert_eq!(status.state, InstallState::Ready);
+        assert_eq!(status.downloaded_bytes, status.total_bytes);
+        assert!(complete.paths().is_ok());
+    }
+
+    #[test]
     fn resumes_partial_files_with_their_hash_state() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let partial = directory.path().join("model.part");
@@ -550,7 +674,7 @@ mod tests {
             format!("{:x}", Sha256::digest(b"hello world"))
         );
 
-        fs::write(&partial, vec![0u8; 100]).expect("oversized partial");
+        fs::write(&partial, vec![0u8; 101]).expect("oversized partial");
         let mut hasher = Sha256::new();
         assert_eq!(
             existing_partial(&partial, 100, &mut hasher).expect("restart"),

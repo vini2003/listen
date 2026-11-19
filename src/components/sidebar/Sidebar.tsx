@@ -1,13 +1,14 @@
 import { useShallow } from "zustand/react/shallow";
 import {
-  AudioLines,
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronRight,
   Folder as FolderIcon,
   FolderPlus,
-  Mic,
   MoreHorizontal,
   Pencil,
+  Plus,
   Settings,
   Trash2,
   UserRound,
@@ -32,9 +33,10 @@ import { meaningfulMeetingDrop, type MeetingDropSpot } from "../../lib/meetingDr
 import { shortcutAria, shortcutLabel } from "../../lib/shortcuts";
 import { useWorkspace } from "../../store/workspace";
 import type { SettingsSection } from "../dialogs/SettingsDialog";
-import { ProjectActions } from "../project/ProjectActions";
+import { SidebarPane } from "./SidebarPane";
 import { Modal } from "../ui/Modal";
 import { ActivityTray, TranscriptionRing } from "./ActivityTray";
+import { SortableProject, SortableProjects } from "./SortableProjects";
 
 interface SidebarProps {
   onCreateProject: () => void;
@@ -47,7 +49,6 @@ type DropSpot = MeetingDropSpot;
 
 const PROJECT_TOGGLE_DELAY_MS = 140;
 const MEETING_DRAG_TYPE = "application/listen-meeting";
-const PROJECT_DRAG_TYPE = "application/listen-project";
 const FOLDER_DRAG_TYPE = "application/listen-folder";
 
 interface MeetingContextMenuState {
@@ -116,10 +117,8 @@ export function Sidebar({
     ...folders.map((folder) => folder.id),
   ]));
   const [draggedMeetingId, setDraggedMeetingId] = useState<string | null>(null);
-  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null);
   const [dropSpot, setDropSpot] = useState<DropSpot | null>(null);
-  const [projectDropIndex, setProjectDropIndex] = useState<number | null>(null);
   const [hoveredCollectionKey, setHoveredCollectionKey] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<MeetingContextMenuState | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
@@ -274,16 +273,9 @@ export function Sidebar({
     setHoveredCollectionKey(null);
   }
 
-  function beginProjectDrag(event: DragEvent, project: Project): void {
-    event.dataTransfer.setData(PROJECT_DRAG_TYPE, project.id);
-    event.dataTransfer.effectAllowed = "move";
-    setDraggedProjectId(project.id);
+  function beginProjectDrag(): void {
+    cancelScheduledProjectToggle();
     setProjectContextMenu(null);
-  }
-
-  function finishProjectDrag(): void {
-    setDraggedProjectId(null);
-    setProjectDropIndex(null);
   }
 
   function beginFolderDrag(event: DragEvent, folder: Folder): void {
@@ -301,10 +293,6 @@ export function Sidebar({
 
   function isMeetingDrag(event: DragEvent): boolean {
     return Boolean(draggedMeetingId) || event.dataTransfer.types.includes(MEETING_DRAG_TYPE);
-  }
-
-  function isProjectDrag(event: DragEvent): boolean {
-    return Boolean(draggedProjectId) || event.dataTransfer.types.includes(PROJECT_DRAG_TYPE);
   }
 
   function isFolderDrag(event: DragEvent): boolean {
@@ -342,27 +330,23 @@ export function Sidebar({
     if (meetingId && destination) await reorderMeeting(meetingId, destination);
   }
 
-  function updateProjectDropIndex(event: DragEvent, index: number): void {
-    if (!isProjectDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-    setProjectDropIndex(index);
+  function moveProject(from: string, to: string): void {
+    const ids = projects.map((project) => project.id);
+    const source = ids.indexOf(from);
+    const target = ids.indexOf(to);
+    if (source < 0 || target < 0 || source === target) return;
+    ids.splice(source, 1);
+    ids.splice(target, 0, from);
+    void reorderProjects(ids);
   }
 
-  function commitProjectDrop(event: DragEvent, index: number): void {
-    if (!isProjectDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const projectId = event.dataTransfer.getData(PROJECT_DRAG_TYPE) || draggedProjectId;
-    finishProjectDrag();
-    if (!projectId) return;
-    const sourceIndex = projects.findIndex((project) => project.id === projectId);
-    if (sourceIndex < 0) return;
-    const insertAt = sourceIndex < index ? index - 1 : index;
-    const ids = projects.map((project) => project.id).filter((id) => id !== projectId);
-    ids.splice(Math.max(0, Math.min(insertAt, ids.length)), 0, projectId);
-    void reorderProjects(ids);
+  function stepProject(id: string, direction: -1 | 1): void {
+    const index = projects.findIndex((project) => project.id === id);
+    const target = projects[index + direction];
+    if (!target) return;
+    setProjectContextMenu(null);
+    moveProject(id, target.id);
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`button[data-project-id="${CSS.escape(id)}"]`)?.focus());
   }
 
   function canNestDraggedFolder(target: { projectId: string; id: string | null }): boolean {
@@ -409,7 +393,7 @@ export function Sidebar({
     event.preventDefault();
     event.stopPropagation();
     const width = 238;
-    const height = 130;
+    const height = 236;
     const bounds = event.currentTarget.getBoundingClientRect();
     const anchorX = event.clientX || bounds.left + 24;
     const anchorY = event.clientY || bounds.bottom;
@@ -644,7 +628,7 @@ export function Sidebar({
               data-folder-id={folder.id}
               aria-keyshortcuts="F2 Delete ArrowLeft ArrowRight"
               aria-expanded={hasContents ? isExpanded : undefined}
-              title="Open folder · F2 rename · Delete remove"
+              title={folder.name}
               onClick={() => {
                 if (hasContents) toggleCollection(folder.id);
               }}
@@ -684,33 +668,28 @@ export function Sidebar({
   }
 
   return (
-    <aside className="sidebar" aria-label="Listen workspace">
-      <div className="sidebar-brand">
-        <span className="brand-mark"><AudioLines size={18} strokeWidth={2.2} /></span>
-        <span>Listen</span>
-      </div>
-
+    <SidebarPane>
       <button
         className="new-recording-button"
         onClick={() => onCreateMeeting(selectedProjectId)}
         aria-keyshortcuts={shortcutAria("n")}
         title={`New meeting (${shortcutLabel("n")})`}
       >
-        <Mic size={17} />
+        <Plus size={17} />
         <span>New meeting</span>
-        <kbd>{shortcutLabel("n")}</kbd>
+        <kbd aria-hidden="true">{shortcutLabel("n")}</kbd>
       </button>
 
       <nav className="sidebar-navigation" aria-label="Projects and recordings">
         <div className="sidebar-section-heading">
-          <span>Projects</span>
+          <h2>Projects</h2>
           <button className="mini-icon-button" onClick={onCreateProject} aria-label="Create project" aria-keyshortcuts={shortcutAria("n", { shift: true })} title={`Create project (${shortcutLabel("n", { shift: true })})`}>
             <FolderPlus size={16} />
           </button>
         </div>
 
-        <div className="project-list">
-          {projects.map((project, projectIndex) => {
+        <SortableProjects projects={projects} onPickUp={beginProjectDrag} onMove={moveProject}>
+          {projects.map((project) => {
             const rootKey = collectionKey(project.id, null);
             const rootMeetings = meetingsByCollection.get(rootKey) ?? [];
             const hasContents = rootMeetings.length > 0
@@ -720,29 +699,13 @@ export function Sidebar({
             const isDropTarget = hoveredCollectionKey === rootKey
               && (Boolean(draggedMeetingId) || Boolean(draggedFolderId));
             return (
-              <Fragment key={project.id}>
-                <ProjectDropIndicator
-                  active={Boolean(draggedProjectId) && projectDropIndex === projectIndex}
-                  onDragOver={(event) => updateProjectDropIndex(event, projectIndex)}
-                  onDrop={(event) => commitProjectDrop(event, projectIndex)}
-                />
-                <div
-                  className={`project-group ${isDropTarget ? "drop-target" : ""} ${project.id === draggedProjectId ? "dragging" : ""}`}
-                  onDragEnter={(event) => {
-                    if (isMeetingDrag(event)) setHoveredCollectionKey(rootKey);
-                  }}
-                >
+              <SortableProject key={project.id} id={project.id} className={isDropTarget ? "drop-target" : undefined}
+                onDragEnter={(event) => { if (isMeetingDrag(event)) setHoveredCollectionKey(rootKey); }}>
+                {(handle) => <>
                   <div
                     className="sidebar-row project-row"
-                    draggable={renamingProjectId !== project.id}
-                    onDragStart={(event) => beginProjectDrag(event, project)}
-                    onDragEnd={finishProjectDrag}
                     onContextMenu={(event) => openProjectContextMenu(event, project)}
                     onDragOver={(event) => {
-                      if (isProjectDrag(event)) {
-                        updateProjectDropIndex(event, rowDropIndex(event, projectIndex));
-                        return;
-                      }
                       if (isFolderDrag(event)) {
                         if (!canNestDraggedFolder({ projectId: project.id, id: null })) return;
                         event.preventDefault();
@@ -755,10 +718,6 @@ export function Sidebar({
                       if (isMeetingDrag(event) && !isExpanded) expandCollection(project.id);
                     }}
                     onDrop={(event) => {
-                      if (isProjectDrag(event)) {
-                        commitProjectDrop(event, rowDropIndex(event, projectIndex));
-                        return;
-                      }
                       if (isFolderDrag(event)) {
                         commitFolderDrop(event, { projectId: project.id, id: null });
                         return;
@@ -792,11 +751,12 @@ export function Sidebar({
                       </form>
                     ) : (
                       <button
+                        {...handle}
                         className="row-main"
                         data-project-id={project.id}
-                        aria-keyshortcuts="F2 Delete ArrowLeft ArrowRight"
+                        aria-keyshortcuts="F2 Delete ArrowLeft ArrowRight Alt+Shift+ArrowUp Alt+Shift+ArrowDown"
                         aria-expanded={hasContents ? isExpanded : undefined}
-                        title="Open project · F2 rename · Delete remove"
+                        title={project.name}
                         onClick={() => {
                           if (hasContents) scheduleProjectToggle(project.id);
                         }}
@@ -807,6 +767,11 @@ export function Sidebar({
                           beginProjectRename(project);
                         }}
                         onKeyDown={(event) => {
+                          if (event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                            event.preventDefault();
+                            stepProject(project.id, event.key === "ArrowUp" ? -1 : 1);
+                            return;
+                          }
                           if (!hasContents || event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
                           event.preventDefault();
                           cancelScheduledProjectToggle();
@@ -822,35 +787,24 @@ export function Sidebar({
                         <span>{project.name}</span>
                       </button>
                     )}
-                    <ProjectActions
-                      project={project}
-                      placement="sidebar"
-                      onCreateFolder={() => void createFolderIn(project.id, null)}
-                    />
+                    <button
+                      className="row-action"
+                      aria-label={`Project options for ${project.name}`}
+                      aria-haspopup="menu"
+                      aria-expanded={projectContextMenu?.projectId === project.id}
+                      onClick={(event) => openProjectContextMenu(event, project)}
+                    ><MoreHorizontal size={15} /></button>
                   </div>
 
-                  {isExpanded ? renderCollectionContents(project.id, null) : null}
-                </div>
-              </Fragment>
+                  {isExpanded && (hasContents || draggedMeetingId) ? renderCollectionContents(project.id, null) : null}
+                </>}
+              </SortableProject>
             );
           })}
-          {projects.length > 0 ? (
-            <ProjectDropIndicator
-              active={Boolean(draggedProjectId) && projectDropIndex === projects.length}
-              onDragOver={(event) => updateProjectDropIndex(event, projects.length)}
-              onDrop={(event) => commitProjectDrop(event, projects.length)}
-            />
-          ) : null}
-
-          {projects.length === 0 ? (
-            <button className="empty-project-prompt" onClick={onCreateProject}>
-              <FolderPlus size={17} />
-              <span>Create your first project</span>
-            </button>
-          ) : null}
-        </div>
+        </SortableProjects>
 
         <div
+          hidden={miscellaneous.length === 0 && !draggedMeetingId}
           className={`miscellaneous-section ${hoveredCollectionKey === collectionKey(null, null) && draggedMeetingId ? "drop-target" : ""}`}
           onDragEnter={(event) => {
             if (isMeetingDrag(event)) setHoveredCollectionKey(collectionKey(null, null));
@@ -867,13 +821,13 @@ export function Sidebar({
             onDragOver={(event) => updateDropSpot(event, null, null, miscellaneous.length)}
             onDrop={(event) => void commitDrop(event, { projectId: null, folderId: null, index: miscellaneous.length })}
           >
-            <span>Unsorted</span>
+            <h2>Unsorted</h2>
           </div>
           {renderMeetingList(null, null, miscellaneous)}
         </div>
       </nav>
 
-      <ActivityTray onOpenSpeechSettings={() => onOpenSettings("transcription")} />
+      <ActivityTray />
       <footer className="sidebar-footer">
         <button onClick={onOpenPeople}><UserRound size={17} /><span>People</span></button>
         <button onClick={() => onOpenSettings()} aria-keyshortcuts={shortcutAria(",")} title={`Settings (${shortcutLabel(",")})`}><Settings size={17} /><span>Settings</span></button>
@@ -895,8 +849,11 @@ export function Sidebar({
             role="menu"
             aria-label={`Actions for ${contextProject.name}`}
           >
+            <button role="menuitem" onClick={() => { setProjectContextMenu(null); expandCollection(contextProject.id); onCreateMeeting(contextProject.id); }}><Plus size={15} /> New meeting</button>
             <button role="menuitem" onClick={() => void createFolderIn(contextProject.id, null)}><FolderPlus size={15} /> New folder</button>
             <button role="menuitem" onClick={() => { setProjectContextMenu(null); beginProjectRename(contextProject); }}><Pencil size={15} /> Rename <kbd className="menu-shortcut">F2</kbd></button>
+            <button role="menuitem" disabled={projects[0]?.id === contextProject.id} onClick={() => stepProject(contextProject.id, -1)}><ArrowUp size={15} /> Move up</button>
+            <button role="menuitem" disabled={projects.at(-1)?.id === contextProject.id} onClick={() => stepProject(contextProject.id, 1)}><ArrowDown size={15} /> Move down</button>
             <div className="menu-divider" role="separator" />
             <button role="menuitem" className="danger-menu-item" onClick={() => { setProjectContextMenu(null); setProjectDeleteCandidate(contextProject); }}>
               <Trash2 size={15} /> Delete <kbd className="menu-shortcut">Del</kbd>
@@ -918,7 +875,7 @@ export function Sidebar({
             role="menu"
             aria-label={`Actions for ${contextFolder.name}`}
           >
-            <button role="menuitem" onClick={() => void createFolderIn(contextFolder.projectId, contextFolder.id)}><FolderPlus size={15} /> New folder inside</button>
+            <button role="menuitem" onClick={() => void createFolderIn(contextFolder.projectId, contextFolder.id)}><FolderPlus size={15} /> New folder</button>
             <button role="menuitem" onClick={() => beginFolderRename(contextFolder)}><Pencil size={15} /> Rename <kbd className="menu-shortcut">F2</kbd></button>
             <div className="menu-divider" role="separator" />
             <button role="menuitem" className="danger-menu-item" onClick={() => { setFolderContextMenu(null); setFolderDeleteCandidate(contextFolder); }}>
@@ -952,13 +909,12 @@ export function Sidebar({
 
       <Modal
         open={Boolean(projectDeleteCandidate)}
-        title="Delete project?"
-        description="Its recordings will move to Unsorted. Their audio and transcripts will remain available."
+        title={`Delete “${projectDeleteCandidate?.name}”?`}
         onClose={() => setProjectDeleteCandidate(null)}
         size="small"
       >
         <div className="confirmation-content">
-          <p><strong>{projectDeleteCandidate?.name}</strong> will be removed from the sidebar.</p>
+          <p>Meetings in this project will move to Unsorted.</p>
           <div className="dialog-actions">
             <button autoFocus className="secondary-button" onClick={() => setProjectDeleteCandidate(null)}>Cancel</button>
             <button
@@ -979,13 +935,12 @@ export function Sidebar({
 
       <Modal
         open={Boolean(folderDeleteCandidate)}
-        title="Delete folder?"
-        description="Anything inside it will move up one level. No recordings are deleted."
+        title={`Delete “${folderDeleteCandidate?.name}”?`}
         onClose={() => setFolderDeleteCandidate(null)}
         size="small"
       >
         <div className="confirmation-content">
-          <p><strong>{folderDeleteCandidate?.name}</strong> will be removed from the sidebar.</p>
+          <p>Meetings and folders inside will move up one level.</p>
           <div className="dialog-actions">
             <button autoFocus className="secondary-button" onClick={() => setFolderDeleteCandidate(null)}>Cancel</button>
             <button
@@ -1006,13 +961,12 @@ export function Sidebar({
 
       <Modal
         open={Boolean(deleteCandidate)}
-        title="Delete?"
-        description="You can undo this action with Ctrl+Z."
+        title={`Delete “${deleteCandidate?.title}”?`}
         onClose={() => setDeleteCandidate(null)}
         size="small"
       >
         <div className="confirmation-content">
-          <p><strong>{deleteCandidate?.title}</strong> will be removed from the sidebar.</p>
+          <p>You can undo this with {shortcutLabel("z")}.</p>
           <div className="dialog-actions">
             <button autoFocus className="secondary-button" onClick={() => setDeleteCandidate(null)}>Cancel</button>
             <button
@@ -1028,7 +982,7 @@ export function Sidebar({
           </div>
         </div>
       </Modal>
-    </aside>
+    </SidebarPane>
   );
 }
 
@@ -1042,18 +996,6 @@ function DropIndicator({
   onDrop: (event: DragEvent) => void;
 }) {
   return <div className={`meeting-drop-indicator ${active ? "active" : ""}`} onDragOver={onDragOver} onDrop={onDrop}><span /></div>;
-}
-
-function ProjectDropIndicator({
-  active,
-  onDragOver,
-  onDrop,
-}: {
-  active: boolean;
-  onDragOver: (event: DragEvent) => void;
-  onDrop: (event: DragEvent) => void;
-}) {
-  return <div className={`meeting-drop-indicator project-drop-indicator ${active ? "active" : ""}`} onDragOver={onDragOver} onDrop={onDrop}><span /></div>;
 }
 
 function collectionKey(projectId: string | null, folderId: string | null): string {
@@ -1119,8 +1061,9 @@ function MeetingRow({
         <button
           className={`sidebar-row meeting-row ${selected ? "selected" : ""}`}
           data-meeting-id={meeting.id}
+          aria-current={selected ? "page" : undefined}
           aria-keyshortcuts="F2 Delete"
-          title="Open recording · F2 rename · Delete remove"
+          title={meeting.title}
           draggable
           onClick={onSelect}
           onDoubleClick={(event) => {

@@ -136,6 +136,8 @@ export interface SpeechModel {
   role: string;
   licence: string;
   sizeBytes: number;
+  downloadedBytes: number;
+  state: SpeechModelsState;
   installed: boolean;
 }
 
@@ -179,6 +181,16 @@ export interface ProjectDraft {
 export interface MeetingDraft {
   title: string;
   projectId: string | null;
+}
+
+export interface MediaImportFile {
+  path: string;
+  name: string;
+}
+
+export interface MediaImportProgress {
+  meetingId: string | null;
+  progress: number | null;
 }
 
 export interface PersonDraft {

@@ -1,4 +1,5 @@
 import { LiveWaveform, WAVEFORM_FRAME_COUNT, LEVEL_POLL_INTERVAL_MS, type LevelFrame } from "./LiveWaveform";
+import { MediaImportButton } from "./MediaImportButton";
 import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { AnimatePresence, motion } from "framer-motion";
@@ -14,11 +15,12 @@ import { useWorkspace } from "../../store/workspace";
 
 interface RecordingDockProps {
   meeting: Meeting;
+  compact?: boolean;
 }
 
 const BACKGROUND_LEVEL_POLL_INTERVAL_MS = 750;
 
-function RecordingDockImpl({ meeting }: RecordingDockProps) {
+function RecordingDockImpl({ meeting, compact = false }: RecordingDockProps) {
   const { devices, settings, meetings, segments, segmentsLoading, updateSettings, startRecording, stopRecording, setRecordingPaused, getRecordingLevels, recordingPaused, busy } = useWorkspace(useShallow((state) => ({
     devices: state.devices,
     settings: state.settings,
@@ -33,6 +35,7 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
     recordingPaused: state.recordingPaused,
     busy: state.busy,
   })));
+  const importing = useWorkspace((state) => state.mediaImport?.meetingId === meeting.id);
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [resumeConfirmOpen, setResumeConfirmOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -40,13 +43,21 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
   const levelFrameId = useRef(0);
   const recording = meeting.status === "recording";
   const processing = meeting.status === "processing";
-  const deviceMenuRef = useDismissableLayer<HTMLDivElement>(deviceMenuOpen, () => setDeviceMenuOpen(false));
-  const resumeConfirmRef = useDismissableLayer<HTMLDivElement>(resumeConfirmOpen, () => setResumeConfirmOpen(false));
+  const deviceButtonRef = useRef<HTMLButtonElement>(null);
+  const recordButtonRef = useRef<HTMLButtonElement>(null);
+  const deviceMenuRef = useDismissableLayer<HTMLDivElement>(deviceMenuOpen, (reason) => {
+    setDeviceMenuOpen(false);
+    if (reason === "escape") deviceButtonRef.current?.focus();
+  });
+  const resumeConfirmRef = useDismissableLayer<HTMLDivElement>(resumeConfirmOpen, (reason) => {
+    setResumeConfirmOpen(false);
+    if (reason === "escape") recordButtonRef.current?.focus();
+  });
   const hasTranscript = segments.some((segment) => segment.meetingId === meeting.id);
   const activeRecording = meetings.find((candidate) => candidate.status === "recording") ?? null;
   // While segments are still loading, assume a transcript exists so the append confirm is never skipped.
   const buttonState = recordButtonState(meeting, activeRecording, hasTranscript || segmentsLoading);
-  const idle = meeting.status === "ready" && hasTranscript && !recording;
+  const recordLabel = buttonState.kind === "resume" ? "Record more audio" : buttonState.label;
 
   useEffect(() => setResumeConfirmOpen(false), [meeting.id]);
 
@@ -124,26 +135,34 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
     await beginRecording();
   }
 
-  return (
-    <div className={`recording-dock ${recording ? "is-recording" : ""} ${idle ? "is-idle" : ""}`} ref={deviceMenuRef}>
-      <button
-        className="device-summary"
-        onClick={() => setDeviceMenuOpen((open) => !open)}
-        disabled={recording || processing}
-        aria-haspopup="dialog"
-        aria-expanded={deviceMenuOpen}
-        aria-label="Choose recording devices"
-      >
+  const devicePicker = (
+    <button
+      ref={deviceButtonRef}
+      className="device-summary"
+      onClick={() => setDeviceMenuOpen((open) => !open)}
+      disabled={recording || processing}
+      aria-haspopup="dialog"
+      aria-expanded={deviceMenuOpen}
+      aria-label="Choose recording devices"
+      title="Choose recording devices"
+    >
+      {!compact && <>
         <span className="device-summary-icons">
-          <Mic size={15} />
+          {settings.captureMicrophone ? <Mic size={15} /> : null}
           {settings.captureSystem ? <MonitorSpeaker size={15} /> : null}
         </span>
         <span className="device-summary-copy">
-          <strong>{settings.captureMicrophone ? microphone?.name || "Choose microphone" : systemDevice?.name || "Choose speaker"}</strong>
-          <small>{settings.captureMicrophone && settings.captureSystem ? systemDevice?.name || "Speaker" : settings.captureMicrophone ? "Microphone only" : "Speaker only"}</small>
+          <strong>{settings.captureMicrophone ? microphone?.name || "Choose microphone" : settings.captureSystem ? systemDevice?.name || "Choose output" : "Choose audio sources"}</strong>
+          {settings.captureMicrophone && settings.captureSystem ? <small>{systemDevice?.name || "System audio"}</small> : null}
         </span>
-        <ChevronDown size={15} />
-      </button>
+      </>}
+      <ChevronDown size={15} />
+    </button>
+  );
+
+  return (
+    <div className={`${compact ? "recording-tools" : "recording-dock"} ${recording ? "is-recording" : ""}`} ref={deviceMenuRef}>
+      {!compact && devicePicker}
 
       <AnimatePresence>
         {deviceMenuOpen ? (
@@ -158,6 +177,7 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
           >
             <DeviceSection
               title="Microphone"
+              focusOnOpen
               enabled={settings.captureMicrophone}
               onEnabledChange={(captureMicrophone) => void updateSettings({ ...settings, captureMicrophone })}
               devices={microphones}
@@ -165,7 +185,7 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
               onSelect={(microphoneDeviceId) => void updateSettings({ ...settings, microphoneDeviceId })}
             />
             <DeviceSection
-              title="Speaker"
+              title="System audio"
               enabled={settings.captureSystem}
               onEnabledChange={(captureSystem) => void updateSettings({ ...settings, captureSystem })}
               devices={systemDevices}
@@ -177,6 +197,9 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
       </AnimatePresence>
 
       <div className="recording-primary" ref={resumeConfirmRef}>
+        {!recording && !processing ? (
+          <MediaImportButton key={meeting.id} meeting={meeting} onPick={() => { setDeviceMenuOpen(false); setResumeConfirmOpen(false); }} />
+        ) : null}
         {recording ? <div className="recording-time"><span className={recordingPaused ? "paused-dot" : "live-dot"} />{formatDuration(elapsed)}</div> : null}
         <AnimatePresence initial={false}>
           {recording ? (
@@ -221,29 +244,29 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
               transition={{ duration: 0.14, ease: EASE_STANDARD }}
             >
               <strong>Add to this recording?</strong>
-              <p>New audio is appended and the whole meeting is re-transcribed when you stop. Speaker assignments may need review.</p>
+              <p>When you stop, Listen transcribes the whole meeting again. Speaker labels may change.</p>
               <div className="resume-confirm-actions">
-                <button className="secondary-button" onClick={() => setResumeConfirmOpen(false)}>Cancel</button>
-                <button className="primary-button" disabled={busy} onClick={() => void beginRecording()}><Mic size={14} /> Resume recording</button>
+                <button autoFocus className="secondary-button" onClick={() => { setResumeConfirmOpen(false); recordButtonRef.current?.focus(); }}>Cancel</button>
+                <button className="primary-button" disabled={busy} onClick={() => void beginRecording()}>Record</button>
               </div>
             </motion.div>
           ) : null}
         </AnimatePresence>
         <motion.button
+          ref={recordButtonRef}
           data-record-meeting={meeting.id}
           className={`record-button ${processing ? "processing" : recording ? "stop" : "start"}`}
           onClick={() => void toggleRecording()}
-          disabled={processing || busy || buttonState.kind === "blocked" || (!settings.captureMicrophone && !settings.captureSystem)}
-          aria-label={buttonState.label}
+          disabled={processing || importing || busy || buttonState.kind === "blocked" || (!settings.captureMicrophone && !settings.captureSystem)}
+          aria-label={recordLabel}
           aria-busy={processing}
           aria-keyshortcuts={shortcutAria("r", { shift: true })}
           title={buttonState.kind === "blocked" || buttonState.kind === "processing"
-            ? buttonState.label
-            : `${buttonState.label} (${shortcutLabel("r", { shift: true })})`}
+            ? recordLabel
+            : `${recordLabel} (${shortcutLabel("r", { shift: true })})`}
           style={meterStyle(levelHistory)}
         >
           {recording && !recordingPaused ? <span className="record-button-meter" /> : null}
-          {buttonState.kind === "resume" ? <span className="record-plus-badge" aria-hidden="true">+</span> : null}
           <AnimatePresence mode="wait" initial={false}>
             <motion.span
               className="record-button-symbol"
@@ -253,11 +276,13 @@ function RecordingDockImpl({ meeting }: RecordingDockProps) {
               exit={{ opacity: 0, scale: 0.65 }}
               transition={{ duration: 0.16, ease: "easeOut" }}
             >
-              {processing ? <span className="record-processing-spinner" /> : recording ? <Square size={18} fill="currentColor" /> : <Mic size={21} />}
+              {processing ? <span className="record-processing-spinner" /> : recording ? <Square size={16} fill="currentColor" /> : <Mic size={compact ? 14 : 17} />}
             </motion.span>
           </AnimatePresence>
+          {!recording && !processing ? <span>Record</span> : null}
         </motion.button>
       </div>
+      {compact && devicePicker}
     </div>
   );
 }
@@ -268,15 +293,16 @@ interface DeviceSectionProps {
   onEnabledChange: (enabled: boolean) => void;
   devices: Array<{ id: string; name: string; subtitle?: string | null; isAvailable: boolean }>;
   selectedId: string | null;
+  focusOnOpen?: boolean;
   onSelect: (id: string) => void;
 }
 
-function DeviceSection({ title, enabled, onEnabledChange, devices, selectedId, onSelect }: DeviceSectionProps) {
+function DeviceSection({ title, enabled, onEnabledChange, devices, selectedId, onSelect, focusOnOpen }: DeviceSectionProps) {
   return (
     <section className="device-section">
       <label className="device-section-title">
         <span>{title}</span>
-        <input type="checkbox" checked={enabled} onChange={(event) => onEnabledChange(event.target.checked)} />
+        <input autoFocus={focusOnOpen} type="checkbox" checked={enabled} onChange={(event) => onEnabledChange(event.target.checked)} />
         <span className="switch" />
       </label>
       {enabled ? (
@@ -286,6 +312,7 @@ function DeviceSection({ title, enabled, onEnabledChange, devices, selectedId, o
               key={device.id}
               className={selectedId === device.id ? "selected" : ""}
               disabled={!device.isAvailable}
+              aria-pressed={selectedId === device.id}
               onClick={() => onSelect(device.id)}
             >
               <span className="device-option-copy">

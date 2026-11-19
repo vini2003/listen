@@ -1,32 +1,30 @@
 import { useEventCallback } from "../../hooks/useEventCallback";
 import { useShallow } from "zustand/react/shallow";
-import { Check, ChevronDown, Copy, Download, LoaderCircle, Mic2, Pause, Play, Sparkles, Trash2, UserPlus } from "lucide-react";
+import { AudioLines, Check, ChevronDown, CircleAlert, Copy, Fingerprint, LoaderCircle, Mic2, Pause, Play, Trash2, UserPlus } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Meeting, Person, TranscriptSegment } from "../../domain/models";
 import { useDismissableLayer } from "../../hooks/useDismissableLayer";
 import { formatDuration } from "../../lib/format";
-import { formatBytes, isDownloading, phaseLabel } from "../../lib/speechModels";
+import { phaseLabel } from "../../lib/speechModels";
+import { shortcutLabel } from "../../lib/shortcuts";
 import { focusFirstMenuItem, moveMenuFocus } from "../../lib/focus";
 import type { MeetingPlayback } from "../../hooks/useMeetingPlayback";
 import { mergeSequentialSegments, transcriptStateFor, type TranscriptTurn } from "../../lib/transcript";
 import { useWorkspace } from "../../store/workspace";
-import type { SettingsSection } from "../dialogs/SettingsDialog";
-import { DownloadProgress, ProgressBar } from "../speech/SpeechModelsPanel";
+import { ProgressBar } from "../speech/SpeechModelsPanel";
 import { Avatar } from "../ui/Avatar";
 
 interface TranscriptProps {
   meeting: Meeting;
   onOpenPeople: () => void;
-  onOpenSettings: (section?: SettingsSection) => void;
   transport: MeetingPlayback;
 }
 
-export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }: TranscriptProps) {
+export function Transcript({ meeting, onOpenPeople, transport }: TranscriptProps) {
   const {
     segments,
     people,
     assignSpeaker,
-    speechModels,
     progress,
     transcribeMeeting,
     busy,
@@ -37,10 +35,9 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     segments: state.segments,
     people: state.people,
     assignSpeaker: state.assignSpeaker,
-    speechModels: state.speechModels,
     progress: state.transcriptionProgress[meeting.id] ?? null,
     transcribeMeeting: state.transcribeMeeting,
-    busy: state.busy,
+    busy: state.busy || state.mediaImport?.meetingId === meeting.id,
     segmentsLoading: state.segmentsLoading,
     loadSegmentAudio: state.loadSegmentAudio,
     deleteTranscriptSegments: state.deleteTranscriptSegments,
@@ -64,10 +61,6 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     return new Map(labels.map((label, index) => [label, `Speaker ${alphabeticLabel(index)}`]));
   }, [meetingSegments]);
   const meetingTurns = useMemo(() => mergeSequentialSegments(meetingSegments), [meetingSegments]);
-  const recording = meeting.status === "recording";
-  const processing = meeting.status === "processing";
-  const modelsReady = speechModels?.state === "ready";
-  const canTranscribe = meeting.durationMs > 0 && modelsReady && !recording && !processing;
   const hasTranscript = meetingSegments.length > 0;
 
   useEffect(() => {
@@ -143,8 +136,8 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     void assignSpeaker(segment.meetingId, segment.speakerLabel, personId);
   });
   const seekTurn = useEventCallback((segment: TranscriptTurn) => {
-    if (transport.status !== "idle") transport.seek(segment.startMs);
-    else void togglePlayback(segment);
+    if (playingAudioId === segment.id || !transport.available) void togglePlayback(segment);
+    else transport.playFrom(segment.startMs);
   });
 
   const transcriptState = transcriptStateFor({
@@ -152,13 +145,11 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     durationMs: meeting.durationMs,
     hasTranscript,
     segmentsLoading,
-    // Until the desktop reports, assume ready so the download prompt never flashes.
-    speechModelsReady: speechModels === null || modelsReady,
   });
 
   if (transcriptState === "loading") {
     return (
-      <div className="transcript-state quiet" aria-busy="true">
+      <div className="transcript-state quiet" role="status" aria-label="Loading transcript" aria-busy="true">
         <span className="notice-spinner" />
       </div>
     );
@@ -167,9 +158,7 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
   if (transcriptState === "recording") {
     return (
       <div className="transcript-state">
-        <span className="recording-state-mark"><span className="live-dot" /></span>
-        <h3>Recording in progress</h3>
-        <p>Listen is capturing audio. The transcript is created after you stop.</p>
+        <p>The transcript will appear after you stop recording.</p>
       </div>
     );
   }
@@ -178,11 +167,9 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
     const fraction = progress?.progress ?? 0;
     return (
       <div className="transcript-state processing-state">
-        <span className="processing-orbit"><Sparkles size={22} /></span>
-        <h3>Building transcript</h3>
-        <p>{progress ? phaseLabel(progress.phase) : "Starting"}{progress && progress.phase !== "queued" ? ` · ${Math.floor(fraction * 100)}%` : "…"}</p>
+        <h3>{progress ? phaseLabel(progress.phase) : "Preparing audio"}</h3>
         <ProgressBar fraction={fraction} label="Transcription progress" />
-        <small className="processing-note">Runs on this computer. You can keep working meanwhile.</small>
+        {progress && progress.phase !== "queued" ? <small>{Math.floor(fraction * 100)}%</small> : null}
       </div>
     );
   }
@@ -190,31 +177,12 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
   if (transcriptState === "failed") {
     return (
       <div className="transcript-state failed-transcript-state">
-        <span><Sparkles size={22} /></span>
-        <h3>No transcript yet</h3>
-        <p>The audio is still saved locally. You can retry whenever you're ready.</p>
+        <span><CircleAlert size={22} /></span>
+        <h3>Couldn't transcribe this meeting</h3>
         {meeting.errorMessage ? (
           <div className="transcript-notice warning-notice"><span>{meeting.errorMessage}</span></div>
         ) : null}
-        {modelsReady ? (
-          <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>
-            <Sparkles size={16} /> Try again
-          </button>
-        ) : (
-          <ModelsDownloadPrompt meetingId={meeting.id} />
-        )}
-      </div>
-    );
-  }
-
-  if (transcriptState === "awaiting-models") {
-    return (
-      <div className="transcript-state">
-        <span><Download size={22} /></span>
-        <h3>Set up transcription</h3>
-        <p>Listen transcribes and recognises voices on this computer, so recordings never leave it. A one-time download of {formatBytes(speechModels?.totalBytes ?? 0)} gets it ready.</p>
-        <ModelsDownloadPrompt meetingId={meeting.id} />
-        <button className="text-link-button" type="button" onClick={() => onOpenSettings("transcription")}>What gets downloaded?</button>
+        <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>Try again</button>
       </div>
     );
   }
@@ -222,17 +190,10 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
   if (transcriptState === "ready-to-transcribe" || transcriptState === "empty") {
     return (
       <div className="transcript-state">
-        <span><Sparkles size={22} /></span>
-        <h3>{transcriptState === "empty" ? "Start a recording" : "Ready to transcribe"}</h3>
-        <p>
-          {transcriptState === "empty"
-            ? "Press the microphone below. Recording continues until you stop."
-            : "Create a transcript with speakers separated and recognised, right on this computer."}
-        </p>
-        {transcriptState === "ready-to-transcribe" && canTranscribe ? (
-          <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>
-            <Sparkles size={16} /> Transcribe
-          </button>
+        <span><AudioLines size={24} strokeWidth={1.5} /></span>
+        <h3>{transcriptState === "empty" ? "No recording yet" : "No transcript yet"}</h3>
+        {transcriptState === "ready-to-transcribe" ? (
+          <button className="primary-button" disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>Transcribe</button>
         ) : null}
       </div>
     );
@@ -243,9 +204,7 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
       {meeting.status === "failed" ? (
         <div className="transcript-notice warning-notice">
           <span>{meeting.errorMessage || "The last transcription attempt failed."}</span>
-          {modelsReady ? (
-            <button disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>Try again</button>
-          ) : null}
+          <button disabled={busy} onClick={() => void transcribeMeeting(meeting.id)}>Try again</button>
         </div>
       ) : null}
       {meetingTurns.map((segment) => (
@@ -268,32 +227,6 @@ export function Transcript({ meeting, onOpenPeople, onOpenSettings, transport }:
         />
       ))}
     </div>
-  );
-}
-
-/** Download button that becomes a live progress bar, then transcribes this meeting. */
-function ModelsDownloadPrompt({ meetingId }: { meetingId: string }) {
-  const { speechModels, downloadSpeechModels, cancelSpeechModelsDownload, transcribeMeeting } = useWorkspace(useShallow((state) => ({
-    speechModels: state.speechModels,
-    downloadSpeechModels: state.downloadSpeechModels,
-    cancelSpeechModelsDownload: state.cancelSpeechModelsDownload,
-    transcribeMeeting: state.transcribeMeeting,
-  })));
-  if (!speechModels) return null;
-  if (isDownloading(speechModels)) {
-    return <div className="inline-download"><DownloadProgress onCancel={() => void cancelSpeechModelsDownload()} /></div>;
-  }
-  return (
-    <>
-      {speechModels.error ? <div className="transcript-notice warning-notice"><span>{speechModels.error}</span></div> : null}
-      <button
-        className="primary-button"
-        type="button"
-        onClick={() => void downloadSpeechModels().then((ready) => { if (ready) void transcribeMeeting(meetingId); })}
-      >
-        <Download size={16} /> {speechModels.downloadedBytes > 0 ? "Resume download and transcribe" : "Download and transcribe"}
-      </button>
-    </>
   );
 }
 
@@ -377,7 +310,7 @@ const TranscriptRow = memo(function TranscriptRow({ segment, people, anonymousNa
           </div>
           {segment.personId && (segment.identitySource === "voiceprint" || segment.identitySource === "local_microphone") ? (
             <span className="identity-auto-badge" title={autoIdentityTitle(segment)} aria-label={autoIdentityTitle(segment)}>
-              {segment.identitySource === "local_microphone" ? <Mic2 size={10} /> : <Sparkles size={10} />}
+              {segment.identitySource === "local_microphone" ? <Mic2 size={10} /> : <Fingerprint size={11} />}
             </span>
           ) : null}
           <button
@@ -412,7 +345,7 @@ const TranscriptRow = memo(function TranscriptRow({ segment, people, anonymousNa
         <button type="button" onClick={() => onCopy(segment)} aria-label={copied ? "Message copied" : "Copy message"} title="Copy">
           {copied ? <Check size={13} /> : <Copy size={13} />}
         </button>
-        <button className="danger-action" type="button" onClick={() => onDelete(segment)} aria-label="Delete message" title="Delete · Ctrl+Z to undo">
+        <button className="danger-action" type="button" onClick={() => onDelete(segment)} aria-label="Delete passage" title={`Delete passage · ${shortcutLabel("z")} to undo`}>
           <Trash2 size={13} />
         </button>
       </div>

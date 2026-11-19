@@ -7,6 +7,8 @@ import type {
   ChatScope,
   Folder,
   FolderDraft,
+  MediaImportFile,
+  MediaImportProgress,
   Meeting,
   MeetingDraft,
   MeetingPlacement,
@@ -46,6 +48,8 @@ export interface DesktopService {
   moveFolder(id: string, parentId: string | null): Promise<Folder>;
   deleteFolder(id: string): Promise<void>;
   createMeeting(draft: MeetingDraft): Promise<Meeting>;
+  pickMeetingMedia(): Promise<MediaImportFile | null>;
+  importMeetingMedia(target: string | MeetingDraft, path: string, progress: (value: number | null) => void): Promise<Meeting>;
   renameMeeting(id: string, title: string): Promise<Meeting>;
   moveMeeting(id: string, projectId: string | null): Promise<Meeting>;
   reorderMeetings(placements: MeetingPlacement[]): Promise<void>;
@@ -98,6 +102,31 @@ const tauriService: DesktopService = {
   moveFolder: (id, parentId) => invoke("move_folder", { id, parentId }),
   deleteFolder: (id) => invoke("delete_folder", { id }),
   createMeeting: (draft) => invoke("create_meeting", { draft }),
+  async pickMeetingMedia() {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const path = await open({
+      title: "Import audio or video",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Audio and video", extensions: [
+        "mp4", "m4v", "mov", "mkv", "webm", "m4a", "aac", "mp3", "wav", "flac", "ogg", "oga", "opus", "aif", "aiff", "caf",
+      ] }],
+    });
+    return path ? { path, name: path.split(/[\\/]/).pop() || path } : null;
+  },
+  async importMeetingMedia(target, path, progress) {
+    const meetingId = typeof target === "string" ? target : null;
+    let active = true;
+    const stop = await listen<MediaImportProgress>("listen://media-import", ({ payload }) => {
+      if (active && payload.meetingId === meetingId) progress(payload.progress);
+    });
+    try {
+      return await invoke<Meeting>("import_meeting_media", { path, meetingId, draft: typeof target === "string" ? null : target });
+    } finally {
+      active = false;
+      stop();
+    }
+  },
   renameMeeting: (id, title) => invoke("rename_meeting", { id, title }),
   moveMeeting: (id, projectId) => invoke("move_meeting", { id, projectId }),
   reorderMeetings: (placements) => invoke("reorder_meetings", { placements }),
@@ -155,16 +184,16 @@ function createBrowserPreviewService(): DesktopService {
   let snapshot = readPreviewState();
   let activeTimer: number | null = null;
   let activeStartedAt: number | null = null;
-  let chatMessages = readPreviewChats();
-  let speechModels = previewSpeechModels(localStorage.getItem("listen-browser-preview-models-v1") === "ready");
-  let downloadTimer: number | null = null;
+  const modelsKey = "listen-browser-preview-models-v1";
+  let speechModels = readPreviewSpeechModels(localStorage.getItem(modelsKey));
+  let downloadController: AbortController | null = null;
   const speechModelListeners = new Set<(status: SpeechModelsStatus) => void>();
   const progressListeners = new Set<(progress: TranscriptionProgress) => void>();
   const activeProgress = new Map<string, TranscriptionProgress>();
 
   function publishSpeechModels(next: SpeechModelsStatus): SpeechModelsStatus {
     speechModels = next;
-    localStorage.setItem("listen-browser-preview-models-v1", next.state === "ready" ? "ready" : "missing");
+    localStorage.setItem(modelsKey, next.state === "ready" ? "ready" : JSON.stringify(next.models.map((model) => model.downloadedBytes)));
     speechModelListeners.forEach((listener) => listener(structuredClone(next)));
     return structuredClone(next);
   }
@@ -183,10 +212,14 @@ function createBrowserPreviewService(): DesktopService {
   }
 
   return {
+    async pickMeetingMedia() { throw new Error("Open the Listen desktop app to import audio or video."); },
+    async importMeetingMedia() { throw new Error("Open the Listen desktop app to import audio or video."); },
     async loadWorkspace() {
+      if (!localStorage.getItem(storageKey)) persist();
       return { ...structuredClone(snapshot), segments: [] };
     },
     async loadAssistantContext(meetingId) {
+      snapshot = readPreviewState();
       const meeting = snapshot.meetings.find((candidate) => candidate.id === meetingId);
       if (!meeting) throw new Error("Meeting not found");
       return {
@@ -461,31 +494,29 @@ function createBrowserPreviewService(): DesktopService {
       return structuredClone(speechModels);
     },
     async downloadSpeechModels() {
-      if (speechModels.state === "ready" || downloadTimer !== null) return structuredClone(speechModels);
-      publishSpeechModels({ ...speechModels, state: "downloading", downloadedBytes: 0, error: null });
-      await new Promise<void>((resolve) => {
-        downloadTimer = window.setInterval(() => {
-          const downloadedBytes = Math.min(speechModels.totalBytes, speechModels.downloadedBytes + speechModels.totalBytes / 40);
-          if (downloadedBytes >= speechModels.totalBytes) {
-            if (downloadTimer !== null) window.clearInterval(downloadTimer);
-            downloadTimer = null;
-            publishSpeechModels(previewSpeechModels(true));
-            resolve();
-            return;
-          }
-          publishSpeechModels({ ...speechModels, downloadedBytes });
-        }, 120);
-      });
+      if (speechModels.state === "ready" || downloadController) return structuredClone(speechModels);
+      const controller = new AbortController();
+      downloadController = controller;
+      publishSpeechModels(previewSpeechModels(speechModels.models.map((model) => model.downloadedBytes), true));
+      while (!controller.signal.aborted && !speechModels.models.every((model) => model.installed)) {
+        await new Promise((resolve) => window.setTimeout(resolve, 120));
+        if (controller.signal.aborted) break;
+        const bytes = speechModels.models.map((model) => {
+          const increment = Math.max(1_800_000, Math.min(16_000_000, Math.round(model.sizeBytes / 28)));
+          return Math.min(model.sizeBytes, model.downloadedBytes + increment);
+        });
+        publishSpeechModels(previewSpeechModels(bytes, true));
+      }
+      if (downloadController === controller) downloadController = null;
       return structuredClone(speechModels);
     },
     async cancelSpeechModelsDownload() {
-      if (downloadTimer === null) return;
-      window.clearInterval(downloadTimer);
-      downloadTimer = null;
-      publishSpeechModels({ ...previewSpeechModels(false), downloadedBytes: speechModels.downloadedBytes });
+      downloadController?.abort();
+      downloadController = null;
+      publishSpeechModels(previewSpeechModels(speechModels.models.map((model) => model.downloadedBytes)));
     },
     async removeSpeechModels() {
-      return publishSpeechModels(previewSpeechModels(false));
+      return publishSpeechModels(previewSpeechModels([]));
     },
     async transcriptionProgress() {
       return [...activeProgress.values()].map((progress) => structuredClone(progress));
@@ -533,7 +564,7 @@ function createBrowserPreviewService(): DesktopService {
       };
     },
     async transcribeMeeting(meetingId) {
-      if (speechModels.state !== "ready") throw new Error("Download the speech models in Settings before transcribing");
+      if (speechModels.state !== "ready") throw new Error("Finish downloading the models before transcribing");
       mutateMeeting(meetingId, { status: "processing", errorMessage: null });
       const phases: TranscriptionPhase[] = ["preparing", "separating", "transcribing", "identifying", "polishing"];
       for (let step = 0; step <= 40; step += 1) {
@@ -559,11 +590,12 @@ function createBrowserPreviewService(): DesktopService {
       return silentWavDataUrl(meeting.durationMs);
     },
     async loadChatMessages(scope) {
-      return structuredClone(chatMessages.filter(
+      return readPreviewChats().filter(
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
-      ));
+      );
     },
     async completeChat(scope, content, messageId = null, clientMessageId = null) {
+      let chatMessages = readPreviewChats();
       const scoped = chatMessages.filter(
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
       );
@@ -590,9 +622,13 @@ function createBrowserPreviewService(): DesktopService {
       chatMessages.push(makePreviewChatMessage(
         scope,
         "assistant",
-        `In the desktop build, GPT-5.6 Luna answers this using the saved transcript and the conversation so far.${previewReference}`,
+        `Open this meeting in the desktop app to ask about its transcript.${previewReference}`,
         nextPosition,
       ));
+      chatMessages = [
+        ...readPreviewChats().filter((message) => message.scopeType !== scope.scopeType || message.scopeId !== scope.scopeId),
+        ...chatMessages.filter((message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId),
+      ];
       persistPreviewChats(chatMessages);
       return structuredClone(chatMessages.filter(
         (message) => message.scopeType === scope.scopeType && message.scopeId === scope.scopeId,
@@ -630,17 +666,32 @@ function persistPreviewChats(messages: ChatMessage[]): void {
   localStorage.setItem("listen-browser-preview-chat-v1", JSON.stringify(messages));
 }
 
-function previewSpeechModels(installed: boolean): SpeechModelsStatus {
-  const models = [
-    { id: "nemotron-3-diarization", name: "Nemotron 3 Diarization", role: "Separates who is speaking", licence: "NVIDIA OpenMDW 1.1", sizeBytes: 402_170_175, installed },
-    { id: "parakeet-tdt-0.6b-v3-int8", name: "Parakeet TDT 0.6B v3", role: "Turns speech into text", licence: "CC BY 4.0", sizeBytes: 670_480_039, installed },
-    { id: "wespeaker-resnet34-lm", name: "WeSpeaker ResNet34-LM", role: "Recognises saved voices", licence: "CC BY 4.0", sizeBytes: 26_530_309, installed },
+function readPreviewSpeechModels(saved: string | null): SpeechModelsStatus {
+  if (saved === "ready") return previewSpeechModels("ready");
+  try {
+    const bytes: unknown = JSON.parse(saved ?? "[]");
+    if (Array.isArray(bytes) && bytes.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+      return previewSpeechModels(bytes);
+    }
+  } catch { /* Older previews stored the word "missing". */ }
+  return previewSpeechModels([]);
+}
+
+function previewSpeechModels(bytes: number[] | "ready", active = false): SpeechModelsStatus {
+  const catalogue = [
+    { id: "nemotron-3-diarization", name: "Nemotron 3 Diarization", role: "Speaker separation", licence: "NVIDIA OpenMDW 1.1", sizeBytes: 402_170_175 },
+    { id: "parakeet-tdt-0.6b-v3-int8", name: "Parakeet TDT 0.6B v3", role: "Transcription", licence: "CC BY 4.0", sizeBytes: 670_480_039 },
+    { id: "wespeaker-resnet34-lm", name: "WeSpeaker ResNet34-LM", role: "Fingerprinting", licence: "CC BY 4.0", sizeBytes: 26_530_309 },
   ];
-  const totalBytes = models.reduce((total, model) => total + model.sizeBytes, 0);
+  const models = catalogue.map((model, index): SpeechModelsStatus["models"][number] => {
+    const downloadedBytes = bytes === "ready" ? model.sizeBytes : Math.min(bytes[index] ?? 0, model.sizeBytes);
+    const installed = downloadedBytes === model.sizeBytes;
+    return { ...model, downloadedBytes, installed, state: installed ? "ready" : active ? "downloading" : "missing" };
+  });
   return {
-    state: installed ? "ready" : "missing",
-    downloadedBytes: installed ? totalBytes : 0,
-    totalBytes,
+    state: models.every((model) => model.installed) ? "ready" : active ? "downloading" : "missing",
+    downloadedBytes: models.reduce((total, model) => total + model.downloadedBytes, 0),
+    totalBytes: models.reduce((total, model) => total + model.sizeBytes, 0),
     error: null,
     models,
   };

@@ -10,6 +10,7 @@ The codebase is separated by responsibility rather than framework convenience:
 - `src/components` contains focused user-interface features.
 - `src-tauri/src/database.rs` owns migrations and all SQLite operations.
 - `src-tauri/src/audio.rs` owns device discovery, capture threads, and rolling audio files.
+- `src-tauri/src/media_decode.rs` streams an audio track from a media file into 16 kHz mono PCM. `media_import.rs` stages the output and publishes it as a meeting session.
 - `src-tauri/src/speech_audio.rs` owns normalized streaming renders and source-isolated clips.
 - `src-tauri/src/speech/` owns the on-device models: diarization, recognition, voice embeddings, and turning their output into speaker turns. It never touches the database, network, or UI.
 - `src-tauri/src/speech_models.rs` owns the pinned model catalogue and the resumable, checksum-verified download.
@@ -35,6 +36,8 @@ The codebase is separated by responsibility rather than framework convenience:
 8. The raw segment text is retained in SQLite while bounded Luna requests conservatively correct likely ASR mistakes and punctuation. Invalid or unavailable cleanup results are discarded without failing the recording.
 
 Keeping microphone and speaker audio as separate tracks avoids realtime resampling and clock-drift corruption. It also prevents a voiceprint from being learned from a mixed passage containing both the local and remote speaker.
+
+Imported audio uses its own system-audio session. When appending to a transcribed meeting, SQLite records where the new audio begins. Transcription processes that part of the recording and offsets the new passages onto the meeting timeline. Existing passages and their speaker assignments keep their IDs.
 
 ## Meeting conversations
 

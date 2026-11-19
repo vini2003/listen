@@ -10,6 +10,7 @@ export interface MeetingPlayback {
   durationMs: number;
   toggle: () => void;
   seek: (ms: number) => void;
+  playFrom: (ms: number) => void;
   pause: () => void;
 }
 
@@ -17,6 +18,7 @@ export function useMeetingPlayback(meeting: Meeting): MeetingPlayback {
   const loadMeetingAudioUrl = useWorkspace((state) => state.loadMeetingAudioUrl);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const preparingRef = useRef(false);
+  const playRequestedRef = useRef(false);
   const pendingSeekMsRef = useRef<number | null>(null);
   const generationRef = useRef(0);
   const [status, setStatus] = useState<"idle" | "preparing" | "ready">("idle");
@@ -35,6 +37,7 @@ export function useMeetingPlayback(meeting: Meeting): MeetingPlayback {
     setCurrentMs(0);
     setDurationMs(meeting.durationMs);
     preparingRef.current = false;
+    playRequestedRef.current = false;
     pendingSeekMsRef.current = null;
     return () => {
       generationRef.current += 1;
@@ -45,23 +48,16 @@ export function useMeetingPlayback(meeting: Meeting): MeetingPlayback {
         audio.removeAttribute("src");
       }
     };
-  }, [meeting.id, meeting.durationMs]);
+  }, [meeting.id, meeting.durationMs, available]);
 
-  useEffect(() => {
-    if (available) return;
-    generationRef.current += 1;
-    preparingRef.current = false;
+  function applyPendingSeek(audio: HTMLAudioElement): void {
+    const target = pendingSeekMsRef.current;
+    if (target === null || audio.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    const position = Number.isFinite(audio.duration) ? Math.min(target, audio.duration * 1000) : target;
+    audio.currentTime = position / 1000;
     pendingSeekMsRef.current = null;
-    const audio = audioRef.current;
-    audioRef.current = null;
-    if (audio) {
-      audio.pause();
-      audio.removeAttribute("src");
-    }
-    setStatus("idle");
-    setPlaying(false);
-    setCurrentMs(0);
-  }, [available]);
+    setCurrentMs(position);
+  }
 
   async function prepare(): Promise<HTMLAudioElement | null> {
     const generation = generationRef.current;
@@ -73,12 +69,12 @@ export function useMeetingPlayback(meeting: Meeting): MeetingPlayback {
       const audio = new Audio(url);
       audio.preload = "auto";
       audio.onloadedmetadata = () => {
-        if (audioRef.current === audio && Number.isFinite(audio.duration)) {
-          setDurationMs(Math.round(audio.duration * 1000));
-        }
+        if (audioRef.current !== audio) return;
+        if (Number.isFinite(audio.duration)) setDurationMs(Math.round(audio.duration * 1000));
+        applyPendingSeek(audio);
       };
       audio.ontimeupdate = () => {
-        if (audioRef.current === audio) setCurrentMs(Math.round(audio.currentTime * 1000));
+        if (audioRef.current === audio && pendingSeekMsRef.current === null) setCurrentMs(Math.round(audio.currentTime * 1000));
       };
       audio.onplay = () => { if (audioRef.current === audio) setPlaying(true); };
       audio.onpause = () => { if (audioRef.current === audio) setPlaying(false); };
@@ -94,17 +90,14 @@ export function useMeetingPlayback(meeting: Meeting): MeetingPlayback {
     }
   }
 
-  async function start(seekMs?: number): Promise<void> {
-    if (seekMs !== undefined) pendingSeekMsRef.current = seekMs;
+  async function play(): Promise<void> {
+    if (!available) return;
+    playRequestedRef.current = true;
     if (preparingRef.current) return;
     const audio = audioRef.current ?? await prepare();
-    if (!audio || audioRef.current !== audio) return;
-    const pending = pendingSeekMsRef.current;
-    pendingSeekMsRef.current = null;
-    if (pending !== null) {
-      audio.currentTime = pending / 1000;
-      setCurrentMs(pending);
-    }
+    if (!audio || audioRef.current !== audio || !playRequestedRef.current) return;
+    applyPendingSeek(audio);
+    if (!audio.paused) return;
     try {
       await audio.play();
     } catch {
@@ -116,19 +109,29 @@ export function useMeetingPlayback(meeting: Meeting): MeetingPlayback {
     if (preparingRef.current) return;
     const audio = audioRef.current;
     if (audio && !audio.paused) {
-      audio.pause();
+      pause();
       return;
     }
-    void start();
+    void play();
   }
 
   function seek(ms: number): void {
-    void start(ms);
+    if (!available || !Number.isFinite(ms)) return;
+    const position = Math.max(0, Math.min(ms, durationMs));
+    pendingSeekMsRef.current = position;
+    setCurrentMs(position);
+    if (audioRef.current) applyPendingSeek(audioRef.current);
+  }
+
+  function playFrom(ms: number): void {
+    seek(ms);
+    void play();
   }
 
   function pause(): void {
+    playRequestedRef.current = false;
     audioRef.current?.pause();
   }
 
-  return { available, status, playing, currentMs, durationMs, toggle, seek, pause };
+  return { available, status, playing, currentMs, durationMs, toggle, seek, playFrom, pause };
 }

@@ -9,7 +9,6 @@ export type TranscriptStateKind =
   | "recording"
   | "processing"
   | "failed"
-  | "awaiting-models"
   | "ready-to-transcribe"
   | "empty";
 
@@ -18,14 +17,13 @@ export function transcriptStateFor(input: {
   durationMs: number;
   hasTranscript: boolean;
   segmentsLoading: boolean;
-  speechModelsReady: boolean;
 }): TranscriptStateKind {
   if (input.hasTranscript) return "transcript";
   if (input.segmentsLoading) return "loading";
   if (input.status === "recording") return "recording";
   if (input.status === "processing") return "processing";
   if (input.status === "failed") return "failed";
-  if (input.durationMs > 0) return input.speechModelsReady ? "ready-to-transcribe" : "awaiting-models";
+  if (input.durationMs > 0) return "ready-to-transcribe";
   return "empty";
 }
 

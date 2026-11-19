@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { memo, useCallback, useState, type CSSProperties } from "react";
+import { memo, useCallback, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { Meeting } from "../../domain/models";
 import { useMeetingPlayback } from "../../hooks/useMeetingPlayback";
 import type { SettingsSection } from "../dialogs/SettingsDialog";
@@ -17,31 +17,48 @@ interface MeetingViewProps {
 function MeetingViewImpl({ meeting, onOpenPeople, onOpenSettings }: MeetingViewProps) {
   const [wideChatWidth, setWideChatWidth] = useState(readWideChatWidth);
   const [askClearance, setAskClearance] = useState(0);
+  const meetingRef = useRef<HTMLElement>(null);
+  const [meetingWidth, setMeetingWidth] = useState(0);
+  useLayoutEffect(() => {
+    const element = meetingRef.current;
+    if (!element) return;
+    setMeetingWidth(element.clientWidth);
+    const observer = new ResizeObserver(([entry]) => setMeetingWidth(entry.contentRect.width));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [meeting.id]);
+  const maxChatWidth = meetingWidth >= 1120 ? Math.min(760, meetingWidth - 520) : undefined;
+  const chatWidth = Math.min(wideChatWidth, maxChatWidth ?? wideChatWidth);
   const saveWidePanelWidth = useCallback((width: number) => {
     try { window.localStorage.setItem("listen.askWidePanelWidth", String(width)); } catch { /* Optional preference. */ }
   }, []);
   const playback = useMeetingPlayback(meeting);
+  const hasSavedAudio = Boolean(meeting.audioDirectory && meeting.durationMs > 0 && meeting.status !== "recording");
 
   return (
     <motion.main
-      className="meeting-view"
+      ref={meetingRef}
+      className={`meeting-view${hasSavedAudio ? " has-saved-audio" : ""}`}
       key={meeting.id}
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
-      style={{ "--wide-chat-width": `${wideChatWidth}px`, "--ask-clearance": `${askClearance}px` } as CSSProperties}
+      style={{ "--wide-chat-width": `${chatWidth}px`, "--ask-clearance": `${askClearance}px` } as CSSProperties}
     >
-      <MeetingHeader meeting={meeting} playback={playback} />
+      <MeetingHeader meeting={meeting} playback={playback}>
+        {hasSavedAudio && meeting.status !== "processing" ? <RecordingDock meeting={meeting} compact /> : null}
+      </MeetingHeader>
       <section className="transcript-container">
-        <Transcript meeting={meeting} onOpenPeople={onOpenPeople} onOpenSettings={onOpenSettings} transport={playback} />
+        <Transcript meeting={meeting} onOpenPeople={onOpenPeople} transport={playback} />
       </section>
 
-      <RecordingDock meeting={meeting} />
+      {!hasSavedAudio ? <RecordingDock meeting={meeting} /> : null}
       <MeetingChat
         meeting={meeting}
         onOpenSettings={onOpenSettings}
         onPanelClearanceChange={setAskClearance}
-        widePanelWidth={wideChatWidth}
+        widePanelWidth={chatWidth}
+        maxWidePanelWidth={maxChatWidth}
         onWidePanelWidthChange={setWideChatWidth}
         onWidePanelResizeEnd={saveWidePanelWidth}
       />

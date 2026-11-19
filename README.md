@@ -15,12 +15,20 @@ Listen is a minimal, local-first desktop application for recording, organizing, 
 - Whole-meeting playback with a transport bar, plus play-from-timestamp and per-passage clips in the transcript
 - Conservative transcript cleanup through `gpt-5.6-luna` with strict structured output
 - Persistent recording- and project-scoped meeting conversations through `gpt-5.6-luna`
-- A one-time, resumable, checksum-verified download of the speech models (1.1 GB), managed in Settings
+- First-launch setup downloads the three required speech models in parallel (1.1 GB total). Downloads can resume after an interruption, and each file is verified before use.
 - Optional OpenAI credentials stored in the operating system credential vault
 - Light, dark, and system themes
 - Releases for Windows x64, macOS on Apple Silicon (13.4+), and Linux x64 with glibc 2.39+ (Ubuntu 24.04, Debian 13, Fedora 40 or newer). ONNX Runtime publishes no build for Intel Macs, so those stay on 0.4.
 
 Listen renders a normalized 16 kHz meeting file after recording stops and runs it through three local models: Nemotron 3 Diarization finds who speaks when, Parakeet TDT transcribes 30-second windows cut at pauses, and each word is attributed to the speaker talking over it. WeSpeaker then measures every detected voice, folds labels that turn out to be the same person, and names voices that clearly match a saved person. On a Ryzen 9 9950X3D an hour of audio takes about two and a half minutes using four threads. A bounded Luna pass can then correct likely recognition mistakes and punctuation without changing timestamps or speaker identities. On macOS, system audio uses ScreenCaptureKit and requires permission under Privacy & Security > Screen & System Audio Recording.
+
+## Importing a recording
+
+Choose **New meeting → Import audio or video…**, select a file, and click **Import meeting**. Listen suggests the filename as the title and lets you choose a project.
+
+To add a file to an existing meeting, open it and choose **Import** beside the recording controls. If the meeting already has audio, confirm with **Append audio**. The new audio plays after the original recording. If the meeting already has a transcript, Listen transcribes only the added audio and preserves the earlier passages and speaker labels.
+
+Listen reads a supported audio track from MP4, MOV, MKV and WebM videos. It also accepts audio files such as M4A, MP3, AAC, WAV, FLAC, Ogg, Opus, AIFF and CAF. Import runs locally and leaves the source file intact.
 
 ## Development
 

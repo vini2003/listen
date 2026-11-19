@@ -7,6 +7,8 @@ mod domain;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_system_audio;
+mod media_decode;
+mod media_import;
 mod speech;
 mod speech_audio;
 mod speech_models;
@@ -17,6 +19,8 @@ mod voice_reference;
 
 use std::{
     collections::HashMap,
+    fs::{File, OpenOptions},
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -39,6 +43,27 @@ use voice_profile_store::VoiceProfileStore;
 
 const TRANSCRIPTION_PROGRESS_EVENT: &str = "listen://transcription-progress";
 const SPEECH_MODELS_EVENT: &str = "listen://speech-models";
+
+/// Also serializes separate Listen processes using the same workspace. The
+/// operating system releases the lock if its owner exits during a job.
+fn try_lock_file(path: &Path) -> AppResult<Option<File>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(Some(file)),
+        Err(error)
+            if error.kind() == ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 struct AppState {
     database: Database,
@@ -140,7 +165,7 @@ async fn open_assistant_window(
     let url =
         tauri::WebviewUrl::App(format!("index.html?view=assistant&meetingId={meeting_id}").into());
     if let Err(error) = tauri::WebviewWindowBuilder::new(&app, "assistant", url)
-        .title(format!("Ask — {}", meeting.title))
+        .title(format!("Chat — {}", meeting.title))
         .inner_size(480.0, 700.0)
         .min_inner_size(360.0, 460.0)
         .resizable(true)
@@ -166,7 +191,7 @@ fn navigate_assistant_window(
     meeting_title: &str,
 ) -> AppResult<()> {
     window
-        .set_title(&format!("Ask — {meeting_title}"))
+        .set_title(&format!("Chat — {meeting_title}"))
         .map_err(|error| AppError::Window(error.to_string()))?;
     window
         .show()
@@ -201,16 +226,28 @@ fn attach_assistant_window(
     meeting_id: String,
 ) -> AppResult<()> {
     state.database.meeting(&meeting_id)?;
+    let main = focus_main_window(&app)?;
+    main.emit("listen://assistant-attached", meeting_id)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    *state.assistant_meeting_id.lock() = None;
+    Ok(())
+}
+
+fn focus_main_window(app: &tauri::AppHandle) -> AppResult<tauri::WebviewWindow> {
     let main = app
         .get_webview_window("main")
         .ok_or(AppError::NotFound("Main window"))?;
     main.show()
         .and_then(|_| main.set_focus())
         .map_err(|error| AppError::Window(error.to_string()))?;
-    main.emit("listen://assistant-attached", meeting_id)
-        .map_err(|error| AppError::Window(error.to_string()))?;
-    *state.assistant_meeting_id.lock() = None;
-    Ok(())
+    Ok(main)
+}
+
+#[tauri::command]
+fn open_chat_settings(app: tauri::AppHandle) -> AppResult<()> {
+    focus_main_window(&app)?
+        .emit("listen://chat-settings", ())
+        .map_err(|error| AppError::Window(error.to_string()))
 }
 
 #[tauri::command]
@@ -221,12 +258,7 @@ fn focus_main_window_reference(
     time_ms: i64,
 ) -> AppResult<()> {
     state.database.meeting(&meeting_id)?;
-    let main = app
-        .get_webview_window("main")
-        .ok_or(AppError::NotFound("Main window"))?;
-    main.show()
-        .and_then(|_| main.set_focus())
-        .map_err(|error| AppError::Window(error.to_string()))?;
+    let main = focus_main_window(&app)?;
     main.emit(
         "listen://assistant-reference",
         AssistantReferenceEvent {
@@ -584,23 +616,75 @@ fn open_diagnostics(state: State<'_, AppState>) -> AppResult<()> {
     state.diagnostics.open()
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaImportProgress<'a> {
+    meeting_id: Option<&'a str>,
+    progress: f32,
+}
+
+#[tauri::command]
+async fn import_meeting_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    meeting_id: Option<String>,
+    draft: Option<MeetingDraft>,
+    path: PathBuf,
+) -> AppResult<Meeting> {
+    if window.label() != "main" {
+        return Err(AppError::Validation(
+            "Import media from the main window.".into(),
+        ));
+    }
+    let database = state.database.clone();
+    let recordings = state.recordings_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_import::import(
+            &database,
+            &recordings,
+            meeting_id.as_deref(),
+            draft,
+            &path,
+            |progress| {
+                let _ = window.emit(
+                    "listen://media-import",
+                    MediaImportProgress {
+                        meeting_id: meeting_id.as_deref(),
+                        progress,
+                    },
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| AppError::Audio(format!("The import worker stopped: {error}")))?
+}
+
 #[tauri::command(async)]
 fn start_recording(
     state: State<'_, AppState>,
     recorder: State<'_, RecordingManager>,
     request: RecordingRequest,
 ) -> AppResult<Meeting> {
-    let directory = state.recordings_directory.join(&request.meeting_id);
-    recorder.start(&request, directory.clone())?;
+    let meeting = state.database.meeting(&request.meeting_id)?;
+    let directory = meeting
+        .audio_directory
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.recordings_directory.join(&meeting.id));
+    let mut started = false;
     let result = state.database.begin_recording(
         &request.meeting_id,
         directory
             .to_str()
             .ok_or_else(|| AppError::Audio("Invalid recording path".to_string()))?,
+        || {
+            recorder.start(&request, directory.clone())?;
+            started = true;
+            Ok(())
+        },
     );
-    if result.is_err() {
+    if started && result.is_err() {
         let _ = recorder.stop(&request.meeting_id);
-        return result;
     }
     result
 }
@@ -630,7 +714,7 @@ fn stop_recording(
     recorder: State<'_, RecordingManager>,
     meeting_id: String,
 ) -> AppResult<Meeting> {
-    let duration_ms = recorder.stop(&meeting_id)?;
+    let (duration_ms, _capture_lock) = recorder.stop(&meeting_id)?;
     state.database.finish_recording(&meeting_id, duration_ms)
 }
 
@@ -640,6 +724,12 @@ async fn transcribe_meeting(
     state: State<'_, AppState>,
     meeting_id: String,
 ) -> AppResult<Meeting> {
+    let meeting = state.database.meeting(&meeting_id)?;
+    let directory = meeting
+        .audio_directory
+        .ok_or_else(|| AppError::Validation("This meeting has no saved audio".into()))?;
+    let _job = try_lock_file(&Path::new(&directory).join(".transcription.lock"))?
+        .ok_or_else(|| AppError::Validation("This meeting is already being transcribed.".into()))?;
     let progress_map = state.transcription_progress.clone();
     let progress_meeting = meeting_id.clone();
     let progress: transcription::ProgressSink = Arc::new(move |phase, fraction| {
@@ -706,7 +796,7 @@ async fn complete_chat(
 ) -> AppResult<Vec<ChatMessage>> {
     if !credentials::has_openai_key()? {
         return Err(AppError::Validation(
-            "Add a text model API key in Settings before asking a question".to_string(),
+            "Add an OpenAI API key in Settings to use chat.".to_string(),
         ));
     }
     let api_key = credentials::openai_key()?;
@@ -726,7 +816,7 @@ async fn complete_chat(
                     .diagnostics
                     .record_chat_error(&scope_type, &scope_id, &error.to_string());
             return Err(AppError::OpenAi(format!(
-                "The text model could not answer that question. Error ID {diagnostic_id}."
+                "Chat couldn’t answer this question. Try again. Error ID {diagnostic_id}."
             )));
         }
     };
@@ -833,11 +923,14 @@ async fn transcribe_and_mark(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let database = Database::open(app_data_dir.clone())
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            media_import::recover(&database, &app_data_dir.join("recordings"))
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             database
                 .recover_interrupted_voice_profiles()
@@ -848,6 +941,19 @@ pub fn run() {
                 .into_iter()
                 .filter(|meeting| meeting.status == "recording")
             {
+                // Another Listen process may still own the capture. Keep its
+                // meeting protected from imports until its final metadata is saved.
+                let lock_path = meeting
+                    .audio_directory
+                    .as_ref()
+                    .map(|directory| Path::new(directory).join(audio::CAPTURE_LOCK));
+                let _capture_lock = match lock_path.filter(|path| path.is_file()) {
+                    Some(path) => match try_lock_file(&path)? {
+                        Some(lock) => Some(lock),
+                        None => continue,
+                    },
+                    None => None,
+                };
                 let saved_duration = meeting
                     .audio_directory
                     .as_deref()
@@ -908,6 +1014,7 @@ pub fn run() {
             attached_assistant_meeting,
             focus_assistant_window,
             attach_assistant_window,
+            open_chat_settings,
             focus_main_window_reference,
             load_meeting_segments,
             find_voice_enrollment_segment,
@@ -943,6 +1050,7 @@ pub fn run() {
             remove_speech_models,
             transcription_progress,
             open_diagnostics,
+            import_meeting_media,
             start_recording,
             stop_recording,
             set_recording_paused,

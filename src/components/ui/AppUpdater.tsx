@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { AnimatePresence, motion } from "framer-motion";
-import { Download, LoaderCircle, X } from "lucide-react";
+import { Download, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 interface AppUpdaterProps {
@@ -54,7 +54,7 @@ export function AppUpdater({ recording }: AppUpdaterProps) {
     } catch {
       setInstalling(false);
       setProgress(null);
-      setError("The update could not be installed. You can try again without losing your work.");
+      setError("Couldn’t install the update. Try again.");
     }
   }
 
@@ -82,17 +82,16 @@ export function AppUpdater({ recording }: AppUpdaterProps) {
           </span>
           <div className="update-toast-copy">
             <strong>{installing ? "Installing update" : `Listen ${available.version} is available`}</strong>
-            <span>{error ?? (recording ? "Finish the active recording before updating." : installing ? progress === null ? "Downloading securely…" : `Downloading securely… ${progress}%` : "Update now and restart when it is ready.")}</span>
+            {error ? <span>{error}</span> : recording ? <span>Stop recording to update.</span> : installing && <span>{progress === null ? "Downloading…" : `${progress}% downloaded`}</span>}
             {installing && progress !== null ? <progress max={100} value={progress} aria-label="Update download progress" /> : null}
           </div>
           <div className="update-toast-actions">
             {!installing ? <button type="button" onClick={dismiss}>Later</button> : null}
             <button className="primary" type="button" disabled={recording || installing} onClick={() => void install()}>
               {installing ? <LoaderCircle className="update-spinner" size={14} /> : <Download size={14} />}
-              {installing ? "Updating" : "Update"}
+              {installing ? "Updating" : "Update and restart"}
             </button>
           </div>
-          {!installing ? <button className="update-toast-close" type="button" onClick={dismiss} aria-label="Dismiss update"><X size={14} /></button> : null}
         </motion.section>
       ) : null}
     </AnimatePresence>

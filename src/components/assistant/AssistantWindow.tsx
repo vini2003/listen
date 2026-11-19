@@ -5,6 +5,7 @@ import type { AssistantContext } from "../../domain/models";
 import {
   ASSISTANT_NAVIGATE_EVENT,
   listenForAssistantEvent,
+  openChatSettingsInMain,
   openReferenceInMain,
 } from "../../services/assistantWindow";
 import { watchTheme } from "../../lib/theme";
@@ -54,7 +55,7 @@ export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
     else {
       contextRequest.current += 1;
       setLoading(false);
-      setError("No recording was selected for Ask.");
+      setError("Select a meeting to open its chat.");
     }
   }, [loadContext, meetingId]);
 
@@ -82,7 +83,18 @@ export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
   }, [loadContext, meetingId]);
 
   useEffect(() => {
-    document.title = context ? `Ask — ${context.meeting.title}` : "Ask — Listen";
+    function focusChat(event: KeyboardEvent): void {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        document.querySelector<HTMLTextAreaElement>("textarea[data-ask-composer]")?.focus();
+      }
+    }
+    window.addEventListener("keydown", focusChat);
+    return () => window.removeEventListener("keydown", focusChat);
+  }, []);
+
+  useEffect(() => {
+    document.title = context ? `Chat — ${context.meeting.title}` : "Chat — Listen";
     return watchTheme(context?.settings.theme ?? "system");
   }, [context]);
 
@@ -90,7 +102,7 @@ export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
     return (
       <main className="assistant-window-state" aria-busy="true">
         <LoaderCircle className="chat-spinner" size={20} />
-        <span>Opening Ask…</span>
+        <span>Opening chat…</span>
       </main>
     );
   }
@@ -99,7 +111,6 @@ export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
     return (
       <main className="assistant-window-state">
         <MessageSquareText size={22} />
-        <strong>Ask could not open</strong>
         <span>{error}</span>
       </main>
     );
@@ -111,6 +122,7 @@ export function AssistantWindow({ initialMeetingId }: AssistantWindowProps) {
         key={context.meeting.id}
         meeting={context.meeting}
         mode="detached"
+        onOpenSettings={openChatSettingsInMain}
         onOpenRecordingReference={(reference) => void openReferenceInMain(reference)}
       />
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />

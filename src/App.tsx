@@ -9,11 +9,11 @@ import { MeetingView } from "./components/meeting/MeetingView";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppUpdater } from "./components/ui/AppUpdater";
 import { ToastViewport } from "./components/ui/ToastViewport";
-import { watchTheme } from "./lib/theme";
 import { focusTranscriptTime } from "./lib/transcriptFocus";
 import {
   ASSISTANT_ATTACHED_EVENT,
   ASSISTANT_REFERENCE_EVENT,
+  CHAT_SETTINGS_EVENT,
   focusAssistantWindow,
   listenForAssistantEvent,
   listenForBrowserReference,
@@ -24,14 +24,11 @@ import { useWorkspace } from "./store/workspace";
 export default function App() {
   const workspace = useWorkspace(useShallow((state) => ({
     dismissToast: state.dismissToast,
-    load: state.load,
-    loading: state.loading,
     meetings: state.meetings,
     redo: state.redo,
     selectMeeting: state.selectMeeting,
     selectedMeetingId: state.selectedMeetingId,
     selectedProjectId: state.selectedProjectId,
-    settings: state.settings,
     toasts: state.toasts,
     undo: state.undo,
   })));
@@ -41,9 +38,10 @@ export default function App() {
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState<{ section?: SettingsSection } | null>(null);
 
-  useEffect(() => { void workspace.load(); }, []);
-
-  useEffect(() => watchTheme(workspace.settings.theme), [workspace.settings.theme]);
+  useEffect(() => {
+    const cleanup = listenForAssistantEvent(CHAT_SETTINGS_EVENT, () => setSettingsOpen({ section: "text-model" }));
+    return () => { void cleanup.then((unlisten) => unlisten()); };
+  }, []);
 
   useEffect(() => {
     function openReference(reference: AssistantReference): void {
@@ -75,9 +73,7 @@ export default function App() {
       if (!workspace.meetings.some((meeting) => meeting.id === meetingId)) return;
       workspace.selectMeeting(meetingId);
       if (focusTimer !== null) window.clearTimeout(focusTimer);
-      focusTimer = window.setTimeout(() => {
-        document.querySelector<HTMLTextAreaElement>("textarea[data-ask-composer]")?.focus();
-      }, 80);
+      focusTimer = window.setTimeout(focusChat, 80);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -98,8 +94,7 @@ export default function App() {
     function handleShortcut(event: KeyboardEvent): void {
       const modifier = event.metaKey || event.ctrlKey;
       if (!modifier) return;
-      const target = event.target as HTMLElement | null;
-      const editingText = target?.matches("input, textarea, [contenteditable='true']") ?? false;
+      const editingText = event.target instanceof Element && event.target.matches("input, textarea, [contenteditable='true']");
       const key = event.key.toLowerCase();
       const dialogOpen = Boolean(document.querySelector('[role="dialog"]'));
 
@@ -116,9 +111,7 @@ export default function App() {
         setSettingsOpen({});
       } else if (key === "k") {
         event.preventDefault();
-        const composer = document.querySelector<HTMLElement>("[data-ask-composer]");
-        if (composer?.matches("textarea")) composer.focus();
-        else void focusAssistantWindow();
+        focusChat();
       } else if (key === "r" && event.shiftKey && selectedMeeting) {
         event.preventDefault();
         document.querySelector<HTMLButtonElement>(`[data-record-meeting="${selectedMeeting.id}"]`)?.click();
@@ -144,10 +137,6 @@ export default function App() {
   });
   const openPeople = useEventCallback(() => setPeopleOpen(true));
 
-  if (workspace.loading) {
-    return <div className="app-loading"><span className="brand-loading-mark">L</span><p>Opening Listen…</p></div>;
-  }
-
   return (
     <div className="app-shell">
       <Sidebar
@@ -165,7 +154,7 @@ export default function App() {
             onOpenSettings={openSettings}
           />
         ) : (
-          <EmptyState onCreateProject={() => setCreateProjectOpen(true)} onCreateMeeting={() => openCreateMeeting(null)} />
+          <EmptyState hasMeetings={workspace.meetings.length > 0} onCreateMeeting={() => openCreateMeeting(workspace.selectedProjectId)} />
         )}
       </div>
 
@@ -179,4 +168,11 @@ export default function App() {
       <SettingsDialog open={settingsOpen !== null} initialSection={settingsOpen?.section} onClose={() => setSettingsOpen(null)} />
     </div>
   );
+}
+
+function focusChat(): void {
+  const control = document.querySelector<HTMLElement>("[data-ask-composer]");
+  if (control instanceof HTMLButtonElement) control.click();
+  else if (control) control.focus();
+  else void focusAssistantWindow();
 }

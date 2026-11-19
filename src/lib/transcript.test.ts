@@ -57,7 +57,6 @@ describe("transcriptStateFor", () => {
     durationMs: 10_000,
     hasTranscript: false,
     segmentsLoading: false,
-    speechModelsReady: true,
   };
 
   it("always renders an existing transcript", () => {
@@ -75,9 +74,8 @@ describe("transcriptStateFor", () => {
     expect(transcriptStateFor({ ...base, status: "failed" })).toBe("failed");
   });
 
-  it("gates transcription on the speech models", () => {
+  it("offers transcription when recorded audio has no transcript", () => {
     expect(transcriptStateFor(base)).toBe("ready-to-transcribe");
-    expect(transcriptStateFor({ ...base, speechModelsReady: false })).toBe("awaiting-models");
   });
 
   it("prompts to record when no audio exists", () => {

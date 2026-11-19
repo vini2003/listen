@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     collections::VecDeque,
     fs::{self, File},
-    io::{BufReader, Cursor, Read},
+    io::{BufReader, Cursor, Read, Seek},
     path::{Path, PathBuf},
 };
 
@@ -35,7 +35,9 @@ struct SourceWav {
     resampler: MonoResampler,
 }
 
-struct MonoResampler {
+type SessionTracks = (String, HashMap<String, Vec<PathBuf>>);
+
+pub(crate) struct MonoResampler {
     input_rate: u32,
     phase: u64,
     sample_sum: i64,
@@ -140,23 +142,38 @@ pub fn recording_sessions(directory: &Path) -> AppResult<Vec<Vec<Vec<PathBuf>>>>
 }
 
 pub fn recording_duration_ms(directory: &Path) -> AppResult<i64> {
-    recording_session_tracks(directory)?
-        .into_iter()
-        .try_fold(0_i64, |total, (_, tracks)| {
-            let session_duration = tracks
-                .values()
-                .map(|paths| track_duration_ms(paths))
-                .collect::<AppResult<Vec<_>>>()?
-                .into_iter()
-                .max()
-                .unwrap_or_default();
-            Ok(total.saturating_add(session_duration))
-        })
+    sessions_duration_ms(&recording_session_tracks(directory)?)
 }
 
-fn recording_session_tracks(
-    directory: &Path,
-) -> AppResult<Vec<(String, HashMap<String, Vec<PathBuf>>)>> {
+fn sessions_duration_ms(sessions: &[SessionTracks]) -> AppResult<i64> {
+    sessions.iter().try_fold(0_i64, |total, (_, tracks)| {
+        Ok(total.saturating_add(session_duration_ms(tracks.values())?))
+    })
+}
+
+fn session_duration_ms<'a>(mut tracks: impl Iterator<Item = &'a Vec<PathBuf>>) -> AppResult<i64> {
+    tracks.try_fold(0, |longest, paths| {
+        Ok(longest.max(track_duration_ms(paths)?))
+    })
+}
+
+/// Session ordering must also hold if the clock moves back between an import
+/// and a later capture.
+pub fn next_session_id(directory: &Path) -> AppResult<i64> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let latest = recording_session_tracks(directory)?
+        .into_iter()
+        .filter_map(|(id, _)| id.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0);
+    Ok(now.max(
+        latest
+            .checked_add(1)
+            .ok_or_else(|| AppError::Audio("Invalid recording timestamp".into()))?,
+    ))
+}
+
+fn recording_session_tracks(directory: &Path) -> AppResult<Vec<SessionTracks>> {
     let mut sessions: HashMap<String, HashMap<String, Vec<PathBuf>>> = HashMap::new();
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
@@ -194,8 +211,8 @@ fn recording_session_tracks(
     Ok(sessions)
 }
 
-/// Writes (or reuses) a cached full-meeting mix at `<directory>/mixed.wav`.
-/// The mix is rebuilt whenever any session WAV is newer than the cached file.
+/// Imported sessions get a new playback URL. A slow export of the previous
+/// timeline can finish without overwriting the new mix or its browser cache.
 pub fn export_mixed_recording(directory: &Path) -> AppResult<PathBuf> {
     export_mixed_recording_with_progress(directory, &mut |_| {})
 }
@@ -206,11 +223,30 @@ pub fn export_mixed_recording_with_progress(
     directory: &Path,
     progress: &mut dyn FnMut(f32),
 ) -> AppResult<PathBuf> {
-    let output_path = directory.join("mixed.wav");
-    let newest_source = recording_session_tracks(directory)?
-        .into_iter()
-        .flat_map(|(_, tracks)| tracks.into_values().flatten())
-        .filter_map(|path| fs::metadata(&path).and_then(|meta| meta.modified()).ok())
+    let sources = recording_session_tracks(directory)?;
+    if let Some(path) = single_import(&sources) {
+        progress(1.0);
+        return Ok(path.to_owned());
+    }
+    let import_session = sources
+        .iter()
+        .rev()
+        .find(|(_, tracks)| {
+            tracks.values().flatten().any(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("-import.wav"))
+            })
+        })
+        .map(|(session, _)| session);
+    let output_path = match import_session {
+        Some(session) => directory.join(format!("mixed-import-{session}.wav")),
+        None => directory.join("mixed.wav"),
+    };
+    let newest_source = sources
+        .iter()
+        .flat_map(|(_, tracks)| tracks.values().flatten())
+        .filter_map(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
         .max();
     let Some(newest_source) = newest_source else {
         return Err(AppError::Audio(
@@ -229,7 +265,7 @@ pub fn export_mixed_recording_with_progress(
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
         let temp_path = directory.join(format!("mixed-{nanos}.wav.tmp"));
-        if let Err(error) = write_mixed_recording(directory, &temp_path, progress) {
+        if let Err(error) = write_mixed_recording(&sources, &temp_path, progress) {
             let _ = fs::remove_file(&temp_path);
             return Err(error);
         }
@@ -238,16 +274,56 @@ pub fn export_mixed_recording_with_progress(
             AppError::Audio(format!("Could not finish meeting audio: {error}"))
         })?;
     }
+    if import_session.is_some() {
+        // Older mixes can be open in a player on Windows. Retry on the next export.
+        let _ = fs::remove_file(directory.join("mixed.wav"));
+        for (session, _) in &sources {
+            if Some(session) != import_session {
+                let _ = fs::remove_file(directory.join(format!("mixed-import-{session}.wav")));
+            }
+        }
+    }
     Ok(output_path)
 }
 
-fn write_mixed_recording(
+fn single_import(sessions: &[SessionTracks]) -> Option<&Path> {
+    let [(_, tracks)] = sessions else { return None };
+    let [path] = tracks.get("system")?.as_slice() else {
+        return None;
+    };
+    (tracks.len() == 1 && path.file_name()?.to_str()?.ends_with("-import.wav"))
+        .then_some(path.as_path())
+}
+
+/// An appended file is already in the format the models need. If an earlier
+/// job was interrupted, mix only the sessions that still need transcription.
+pub fn prepare_imported_recording(
     directory: &Path,
+    first_session: i64,
+    temporary_directory: &Path,
+    progress: &mut dyn FnMut(f32),
+) -> AppResult<(PathBuf, Vec<String>)> {
+    let sessions = recording_session_tracks(directory)?;
+    let start = sessions
+        .iter()
+        .position(|(id, _)| id.parse::<i64>() == Ok(first_session))
+        .ok_or_else(|| AppError::Audio("The imported recording is missing.".into()))?;
+    let sessions = &sessions[start..];
+    if let Some(path) = single_import(sessions) {
+        return Ok((path.to_owned(), vec!["system".to_string()]));
+    }
+    let active = active_session_sources(sessions)?;
+    let output = temporary_directory.join("remaining.wav");
+    write_mixed_recording(sessions, &output, progress)?;
+    Ok((output, active))
+}
+
+fn write_mixed_recording(
+    sessions: &[SessionTracks],
     output_path: &Path,
     progress: &mut dyn FnMut(f32),
 ) -> AppResult<i64> {
-    let total_ms = recording_duration_ms(directory)?.max(1);
-    let sessions = recording_sessions(directory)?;
+    let total_ms = sessions_duration_ms(sessions)?.max(1);
     let mut writer = hound::WavWriter::create(
         output_path,
         hound::WavSpec {
@@ -260,8 +336,9 @@ fn write_mixed_recording(
     .map_err(|error| AppError::Audio(format!("Could not prepare meeting audio: {error}")))?;
 
     let mut duration_ms = 0_i64;
-    for tracks in sessions {
-        for part in MixedSpeechWavParts::new(tracks, MIX_BUFFER_DURATION_MS) {
+    for (_, tracks) in sessions {
+        let files = tracks.values().cloned().collect();
+        for part in MixedSpeechWavParts::new(files, MIX_BUFFER_DURATION_MS) {
             let part = part?;
             for sample in decode_wav(&part.bytes)? {
                 writer.write_sample(sample).map_err(|error| {
@@ -279,17 +356,21 @@ fn write_mixed_recording(
 }
 
 pub fn active_capture_sources(directory: &Path) -> AppResult<Vec<String>> {
+    active_session_sources(&recording_session_tracks(directory)?)
+}
+
+fn active_session_sources(sessions: &[SessionTracks]) -> AppResult<Vec<String>> {
     const ANALYSIS_SAMPLES: usize = SPEECH_SAMPLE_RATE as usize;
     const MIN_ACTIVE_RMS: f64 = 120.0;
     const MIN_LOUD_SAMPLES: u64 = SPEECH_SAMPLE_RATE as u64 / 4;
     const LOUD_SAMPLE_LEVEL: i16 = 220;
 
     let mut source_stats = HashMap::<String, (f64, u64)>::new();
-    for (_, tracks) in recording_session_tracks(directory)? {
+    for (_, tracks) in sessions {
         for (source_name, paths) in tracks {
-            let stats = source_stats.entry(source_name).or_default();
+            let stats = source_stats.entry(source_name.clone()).or_default();
             for path in paths {
-                let mut source = SourceWav::open(&path)?;
+                let mut source = SourceWav::open(path)?;
                 loop {
                     let mut samples = Vec::with_capacity(ANALYSIS_SAMPLES);
                     let finished = source.fill(&mut samples, ANALYSIS_SAMPLES)?;
@@ -332,6 +413,26 @@ pub fn mixed_recording_clip_data_url(
     let mut timeline_ms = 0_i64;
     let mut clip = Vec::new();
     for tracks in recording_sessions(directory)? {
+        if timeline_ms >= end_ms {
+            break;
+        }
+        let duration = session_duration_ms(tracks.iter())?;
+        let session_end = timeline_ms + duration;
+        if session_end <= start_ms {
+            timeline_ms = session_end;
+            continue;
+        }
+        // Imported sessions have a single normalized track. Jump straight to
+        // the selected line, including when it's hours into the recording.
+        if let [paths] = tracks.as_slice() {
+            clip.extend(source_clip(
+                paths,
+                (start_ms - timeline_ms).max(0),
+                (end_ms - timeline_ms).min(duration),
+            )?);
+            timeline_ms = session_end;
+            continue;
+        }
         for part in MixedSpeechWavParts::new(tracks, MIX_BUFFER_DURATION_MS) {
             let part = part?;
             let part_end_ms = timeline_ms + part.duration_ms;
@@ -347,9 +448,6 @@ pub fn mixed_recording_clip_data_url(
             if timeline_ms >= end_ms {
                 break;
             }
-        }
-        if timeline_ms >= end_ms {
-            break;
         }
     }
     if clip.is_empty() {
@@ -372,13 +470,7 @@ pub fn recording_source_clip(
     let mut timeline_ms = 0_i64;
     let mut output = Vec::new();
     for (_, tracks) in recording_session_tracks(directory)? {
-        let session_duration_ms = tracks
-            .values()
-            .map(|paths| track_duration_ms(paths))
-            .collect::<AppResult<Vec<_>>>()?
-            .into_iter()
-            .max()
-            .unwrap_or_default();
+        let session_duration_ms = session_duration_ms(tracks.values())?;
         let session_end_ms = timeline_ms + session_duration_ms;
         if end_ms > timeline_ms && start_ms < session_end_ms {
             let local_start_ms = (start_ms - timeline_ms).max(0);
@@ -534,7 +626,7 @@ impl SourceWav {
 }
 
 impl MonoResampler {
-    fn new(input_rate: u32) -> Self {
+    pub(crate) fn new(input_rate: u32) -> Self {
         Self {
             input_rate: input_rate.max(1),
             phase: 0,
@@ -543,7 +635,7 @@ impl MonoResampler {
         }
     }
 
-    fn push(&mut self, sample: i16, output: &mut Vec<i16>) {
+    pub(crate) fn push(&mut self, sample: i16, output: &mut Vec<i16>) {
         self.sample_sum += i64::from(sample);
         self.sample_count += 1;
         self.phase += u64::from(SPEECH_SAMPLE_RATE);
@@ -561,7 +653,7 @@ impl MonoResampler {
     }
 }
 
-fn normalize_reader<R: Read>(
+fn normalize_reader<R: Read + Seek>(
     reader: &mut hound::WavReader<R>,
     start_frame: u64,
     end_frame: u64,
@@ -570,10 +662,12 @@ fn normalize_reader<R: Read>(
     let spec = reader.spec();
     validate_pcm16(spec)?;
     let channels = usize::from(spec.channels);
+    let start_frame = start_frame.min(u64::from(reader.duration()));
+    reader.seek(start_frame as u32)?;
     let mut samples = reader.samples::<i16>();
     let mut resampler = MonoResampler::new(spec.sample_rate);
     let mut output = Vec::with_capacity(max_output_samples);
-    let mut frame = 0_u64;
+    let mut frame = start_frame;
 
     while frame < end_frame && output.len() < max_output_samples {
         let Some(first) = samples.next() else {
@@ -586,9 +680,7 @@ fn normalize_reader<R: Read>(
             })?;
             sum += i64::from(sample.map_err(decode_error)?);
         }
-        if frame >= start_frame {
-            resampler.push((sum / channels as i64) as i16, &mut output);
-        }
+        resampler.push((sum / channels as i64) as i16, &mut output);
         frame += 1;
     }
     Ok(output)
@@ -745,6 +837,31 @@ mod tests {
     }
 
     #[test]
+    fn transcribes_only_the_sessions_starting_at_the_saved_import() {
+        let directory = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let original = directory.path().join("microphone-100-0000.wav");
+        let first = directory.path().join("system-200-import.wav");
+        let second = directory.path().join("system-300-import.wav");
+        mono_wav(&original, &[1_000; 8_000]);
+        mono_wav(&first, &[2_000; 8_000]);
+        let prepare = || {
+            prepare_imported_recording(directory.path(), 200, staging.path(), &mut |_| {}).unwrap()
+        };
+        assert_eq!(prepare(), (first.clone(), vec!["system".to_owned()]));
+        mono_wav(&second, &[-3_000; 8_000]);
+        let (remaining, active) = prepare();
+        assert_eq!(active, ["system"]);
+        let samples = hound::WavReader::open(remaining)
+            .unwrap()
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(samples.len(), 16_000);
+        assert_eq!((samples[0], samples[8_000]), (2_000, -3_000));
+    }
+
+    #[test]
     fn ignores_generated_audio_when_scanning_recording_tracks() {
         let directory = tempfile::tempdir().unwrap();
         let microphone = directory.path().join("microphone-123-0000.wav");
@@ -791,12 +908,21 @@ mod tests {
     fn extracts_timestamped_playback_from_the_mixed_timeline() {
         let directory = tempfile::tempdir().unwrap();
         let microphone = directory.path().join("microphone-123-0000.wav");
-        mono_wav(&microphone, &[600; 32_000]);
+        mono_wav(&microphone, &[600; 16_000]);
+        let imported = directory.path().join("system-124-import.wav");
+        mono_wav(&imported, &[-800; 16_000]);
 
         let audio = mixed_recording_clip_data_url(directory.path(), 500, 1_500).unwrap();
 
-        assert!(audio.starts_with("data:audio/wav;base64,UklGR"));
-        assert!(audio.len() > 40_000);
+        let bytes = BASE64
+            .decode(audio.strip_prefix("data:audio/wav;base64,").unwrap())
+            .unwrap();
+        let samples = decode_wav(&bytes).unwrap();
+        assert_eq!(samples.len(), 16_000);
+        assert_eq!(
+            (samples[0], samples[7_999], samples[8_000], samples[15_999]),
+            (600, 600, -800, -800)
+        );
     }
 
     #[test]

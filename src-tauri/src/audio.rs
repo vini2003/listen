@@ -7,7 +7,7 @@ use std::{
         mpsc as std_mpsc, Arc,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 #[cfg(target_os = "linux")]
@@ -31,6 +31,7 @@ const MAX_PCM_BYTES_PER_CHUNK: u64 = 20 * 1024 * 1024;
 const METER_FLOOR_DB: f32 = -62.0;
 const METER_CEILING_DB: f32 = -12.0;
 const METER_RESPONSE: f32 = 0.7;
+pub const CAPTURE_LOCK: &str = ".recording.lock";
 pub struct RecordingManager {
     active: Mutex<Option<RecordingThread>>,
 }
@@ -56,6 +57,8 @@ impl RecordingManager {
         }
 
         fs::create_dir_all(&directory)?;
+        let capture_lock = crate::try_lock_file(&directory.join(CAPTURE_LOCK))?
+            .ok_or_else(|| AppError::Audio("This meeting is already recording.".into()))?;
         let thread_request = request.clone();
         let paused = Arc::new(AtomicBool::new(false));
         let thread_paused = Arc::clone(&paused);
@@ -91,6 +94,7 @@ impl RecordingManager {
         match startup_receiver.recv() {
             Ok(Ok(())) => {
                 *active = Some(RecordingThread {
+                    capture_lock,
                     meeting_id: request.meeting_id.clone(),
                     stop_sender,
                     paused,
@@ -145,7 +149,7 @@ impl RecordingManager {
         Ok(recording.levels.snapshot(elapsed_ms))
     }
 
-    pub fn stop(&self, meeting_id: &str) -> AppResult<i64> {
+    pub fn stop(&self, meeting_id: &str) -> AppResult<(i64, File)> {
         let mut active = self.active.lock();
         let recording = active
             .take()
@@ -160,14 +164,16 @@ impl RecordingManager {
             .stop_sender
             .send(())
             .map_err(|error| AppError::Audio(format!("Could not stop audio thread: {error}")))?;
-        recording
+        let duration = recording
             .handle
             .join()
-            .map_err(|_| AppError::Audio("The audio thread crashed".to_string()))?
+            .map_err(|_| AppError::Audio("The audio thread crashed".to_string()))??;
+        Ok((duration, recording.capture_lock))
     }
 }
 
 struct RecordingThread {
+    capture_lock: File,
     meeting_id: String,
     stop_sender: std_mpsc::Sender<()>,
     paused: Arc<AtomicBool>,
@@ -273,10 +279,7 @@ impl ActiveRecording {
         #[cfg(target_os = "macos")]
         let session_started_at = Instant::now();
 
-        let session_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let session_id = crate::speech_audio::next_session_id(&directory)?;
 
         if request.capture_microphone {
             let prefix = format!("microphone-{session_id}");

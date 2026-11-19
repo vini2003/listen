@@ -5,6 +5,10 @@ const service = vi.hoisted(() => ({
   loadWorkspace: vi.fn(),
   loadMeetingSegments: vi.fn(),
   createProject: vi.fn(),
+  reorderProjects: vi.fn(),
+  pickMeetingMedia: vi.fn(),
+  importMeetingMedia: vi.fn(),
+  transcribeMeeting: vi.fn(),
   assignSpeaker: vi.fn(),
   findVoiceEnrollmentSegment: vi.fn(),
   enrollVoiceProfile: vi.fn(),
@@ -141,6 +145,134 @@ describe("workspace loading", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(useWorkspace.getState().segments).toEqual([selectedSegment]);
     expect(useWorkspace.getState().segmentsLoading).toBe(false);
+  });
+});
+
+describe("project order", () => {
+  const projectIds = () => useWorkspace.getState().projects.map((project) => project.id);
+  beforeEach(() => {
+    const projects = ["a", "b", "c"].map((id, position) => ({ id, position, name: id, createdAt: firstMeeting.createdAt }));
+    useWorkspace.setState({ projects, toasts: [] });
+    service.reorderProjects.mockReset();
+  });
+
+  it("shows consecutive drops immediately and persists them in order", async () => {
+    let finishFirst!: () => void;
+    service.reorderProjects.mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirst = resolve; }));
+    service.reorderProjects.mockResolvedValueOnce(undefined);
+    const { reorderProjects } = useWorkspace.getState();
+    const first = reorderProjects(["c", "a", "b"]);
+    expect(projectIds()).toEqual(["c", "a", "b"]);
+    const second = reorderProjects(["c", "b", "a"]);
+    expect(projectIds()).toEqual(["c", "b", "a"]);
+    await vi.waitFor(() => expect(service.reorderProjects).toHaveBeenCalledTimes(1));
+    finishFirst();
+    expect(await Promise.all([first, second])).toEqual([true, true]);
+    expect(service.reorderProjects.mock.calls).toEqual([[["c", "a", "b"]], [["c", "b", "a"]]]);
+    expect(useWorkspace.getState().projects.map((p) => p.position)).toEqual([0, 1, 2]);
+  });
+
+  it("rolls back to the last saved order while preserving changes to the project list", async () => {
+    let failLast!: (error: Error) => void;
+    service.reorderProjects.mockResolvedValueOnce(undefined);
+    service.reorderProjects.mockImplementationOnce(() => new Promise<void>((_, reject) => { failLast = reject; }));
+    const { reorderProjects } = useWorkspace.getState();
+    const first = reorderProjects(["b", "c", "a"]);
+    const second = reorderProjects(["a", "c", "b"]);
+    expect(await first).toBe(true);
+    await vi.waitFor(() => expect(service.reorderProjects).toHaveBeenCalledTimes(2));
+    useWorkspace.setState(({ projects }) => ({ projects: [
+      ...projects.filter((p) => p.id !== "b").map((p) => ({ ...p, name: p.id === "c" ? "Renamed" : p.name })),
+      { id: "d", position: 2, name: "New", createdAt: firstMeeting.createdAt },
+    ] }));
+    failLast(new Error("Couldn't save project order"));
+    expect(await second).toBe(false);
+    expect(projectIds()).toEqual(["c", "a", "d"]);
+    expect(useWorkspace.getState().projects[0].name).toBe("Renamed");
+    expect(useWorkspace.getState().toasts.at(-1)?.message).toBe("Couldn't save project order");
+    service.reorderProjects.mockResolvedValueOnce(undefined);
+    expect(await reorderProjects(["d", "c", "a"])).toBe(true);
+    expect(projectIds()).toEqual(["d", "c", "a"]);
+  });
+
+  it("keeps the newer drop visible if the first write fails and undoes to the saved order", async () => {
+    let failFirst!: (error: Error) => void;
+    let finishLast!: () => void;
+    service.reorderProjects
+      .mockImplementationOnce(() => new Promise<void>((_, reject) => { failFirst = reject; }))
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finishLast = resolve; }))
+      .mockResolvedValue(undefined);
+    const original = useWorkspace.getState().projects;
+    const { reorderProjects, undo } = useWorkspace.getState();
+    const first = reorderProjects(["b", "a", "c"]);
+    const second = reorderProjects(["c", "b", "a"]);
+    await vi.waitFor(() => expect(service.reorderProjects).toHaveBeenCalledTimes(1));
+    failFirst(new Error("First save failed"));
+    expect(await first).toBe(false);
+    expect(projectIds()).toEqual(["c", "b", "a"]);
+    await vi.waitFor(() => expect(service.reorderProjects).toHaveBeenCalledTimes(2));
+    service.loadWorkspace.mockResolvedValueOnce({ ...snapshot, projects: original });
+    const undoWhileSaving = undo();
+    finishLast();
+    expect(await second).toBe(true);
+    await undoWhileSaving;
+    expect(service.reorderProjects).toHaveBeenLastCalledWith(["a", "b", "c"]);
+    expect(projectIds()).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("media imports", () => {
+  const file = { path: "/archive/Review.mp4", name: "Review.mp4" };
+  beforeEach(() => {
+    useWorkspace.setState({
+      ...structuredClone(snapshot), speechModels: readyModels, mediaImport: null, toasts: [],
+      selectedMeetingId: firstMeeting.id, segments: [selectedSegment], segmentsLoading: false,
+    });
+    service.importMeetingMedia.mockReset();
+    service.transcribeMeeting.mockReset();
+    service.loadMeetingSegments.mockResolvedValue([]);
+  });
+
+  it("does not create a meeting or start transcription when the file has no audio", async () => {
+    service.importMeetingMedia.mockRejectedValue(new Error("Audio error: This video has no supported audio track."));
+    const before = useWorkspace.getState().meetings;
+    expect(await useWorkspace.getState().importMeetingMedia({ title: "Review", projectId: null }, file)).toBe(false);
+    const state = useWorkspace.getState();
+    expect(state.meetings).toEqual(before);
+    expect(state.segments).toEqual([selectedSegment]);
+    expect(state.mediaImport).toBeNull();
+    expect(state.toasts.at(-1)?.message).toBe("This video has no supported audio track.");
+    expect(service.transcribeMeeting).not.toHaveBeenCalled();
+  });
+
+  it("queues one transcription for the imported meeting even after the user navigates away", async () => {
+    let finish!: (meeting: Meeting) => void;
+    const created = { ...firstMeeting, id: "imported", title: "Review", status: "processing" as const };
+    service.importMeetingMedia.mockImplementation((_target, _path, progress) => {
+      progress(0.4);
+      return new Promise<Meeting>((resolve) => { finish = resolve; });
+    });
+    service.transcribeMeeting.mockResolvedValue({ ...created, status: "ready" });
+    const state = useWorkspace.getState();
+    const pending = state.importMeetingMedia({ title: "Review", projectId: null }, file);
+    expect(useWorkspace.getState().mediaImport).toEqual({ meetingId: null, progress: 0.4 });
+    expect(await state.importMeetingMedia(firstMeeting.id, file)).toBe(false);
+    state.selectMeeting("meeting-2");
+    finish(created);
+    expect(await pending).toBe(true);
+    expect(service.transcribeMeeting).toHaveBeenCalledExactlyOnceWith("imported");
+    expect(useWorkspace.getState().selectedMeetingId).toBe("meeting-2");
+    expect(useWorkspace.getState().meetings[0].id).toBe("imported");
+    expect(useWorkspace.getState().mediaImport).toBeNull();
+  });
+
+  it("updates the duration of an existing meeting without inserting another row", async () => {
+    const appended = { ...firstMeeting, durationMs: 8000, status: "processing" as const };
+    service.importMeetingMedia.mockResolvedValue(appended);
+    service.transcribeMeeting.mockResolvedValue({ ...appended, status: "ready" });
+    expect(await useWorkspace.getState().importMeetingMedia(firstMeeting.id, file)).toBe(true);
+    expect(service.transcribeMeeting).toHaveBeenCalledExactlyOnceWith(firstMeeting.id);
+    expect(useWorkspace.getState().meetings.map((meeting) => meeting.durationMs)).toEqual([8000, 1000]);
   });
 });
 

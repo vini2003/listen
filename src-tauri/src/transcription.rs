@@ -125,16 +125,28 @@ pub async fn transcribe_meeting(
         .map(PathBuf::from)
         .ok_or_else(|| AppError::Validation("This meeting has no saved audio".to_string()))?;
     let model_paths = models.paths()?;
+    let boundary = database.import_transcription_boundary(meeting_id)?;
 
     progress(Phase::Preparing, 0.0);
     let directory = audio_directory.clone();
     let pipeline_progress = progress.clone();
-    let (active_sources, transcript) = tauri::async_runtime::spawn_blocking(move || {
-        let wav =
-            speech_audio::export_mixed_recording_with_progress(&directory, &mut |fraction| {
-                pipeline_progress(Phase::Preparing, fraction * 0.9)
-            })?;
-        let active_sources = speech_audio::active_capture_sources(&directory)?;
+    let (active_sources, mut transcript) = tauri::async_runtime::spawn_blocking(move || {
+        let mut preparing = |fraction| pipeline_progress(Phase::Preparing, fraction * 0.9);
+        let staging;
+        let (wav, active_sources) = if let Some((session, _)) = boundary {
+            staging = tempfile::tempdir()?;
+            speech_audio::prepare_imported_recording(
+                &directory,
+                session,
+                staging.path(),
+                &mut preparing,
+            )?
+        } else {
+            (
+                speech_audio::export_mixed_recording_with_progress(&directory, &mut preparing)?,
+                speech_audio::active_capture_sources(&directory)?,
+            )
+        };
         pipeline_progress(Phase::Preparing, 1.0);
         let transcript = speech::transcribe(&wav, &model_paths, &mut |stage, fraction| {
             let phase = match stage {
@@ -148,12 +160,24 @@ pub async fn transcribe_meeting(
     })
     .await
     .map_err(|error| AppError::Speech(format!("The speech worker stopped: {error}")))??;
-    if transcript.turns.is_empty() {
+    if transcript.turns.is_empty() && boundary.is_none() {
         return Err(AppError::Validation(
             "No speech was found in this recording".to_string(),
         ));
     }
 
+    let import_session = boundary.map(|(session, _)| session);
+    let append_from_ms = boundary.map(|(_, offset)| offset);
+    if let Some(offset) = append_from_ms {
+        for turn in &mut transcript.turns {
+            turn.start_ms += offset;
+            turn.end_ms += offset;
+        }
+        for span in &mut transcript.spans {
+            span.start_ms += offset;
+            span.end_ms += offset;
+        }
+    }
     let people = database.people()?;
     let settings = database.settings()?;
     let profiles = database.voice_profiles()?;
@@ -198,7 +222,7 @@ pub async fn transcribe_meeting(
     let (identities, mut identity_decisions) = identify_voices(&transcript.voices, &candidates);
     progress(Phase::Identifying, 1.0);
 
-    voice_reference::write_overlap_metadata(&audio_directory, &transcript.spans)?;
+    voice_reference::write_overlap_metadata(&audio_directory, &transcript.spans, append_from_ms)?;
     let existing_segments = database.segments_for_meeting(meeting_id)?;
     let mut segments = Vec::with_capacity(transcript.turns.len());
     for turn in &transcript.turns {
@@ -236,7 +260,7 @@ pub async fn transcribe_meeting(
         segments.push(TranscriptSegment {
             id: Uuid::new_v4().to_string(),
             meeting_id: meeting_id.to_string(),
-            speaker_label: speaker_label(turn.speaker),
+            speaker_label: recording_speaker_label(import_session, speaker_label(turn.speaker)),
             person_id,
             identity_source,
             identity_confidence,
@@ -246,6 +270,8 @@ pub async fn transcribe_meeting(
         });
     }
     for decision in &mut identity_decisions {
+        decision.speaker =
+            recording_speaker_label(import_session, std::mem::take(&mut decision.speaker));
         if segments.iter().any(|segment| {
             segment.speaker_label == decision.speaker
                 && segment.identity_source.as_deref() == Some("local_microphone")
@@ -271,7 +297,7 @@ pub async fn transcribe_meeting(
             segment.identity_confidence = None;
         }
     }
-    database.replace_segments(meeting_id, segments.clone())?;
+    database.store_transcription_segments(meeting_id, &segments, import_session)?;
 
     let cleanup_error = if credentials::has_openai_key().unwrap_or(false) {
         progress(Phase::Polishing, 0.0);
@@ -315,6 +341,14 @@ pub async fn transcribe_meeting(
 
 pub fn speaker_label(speaker: usize) -> String {
     format!("voice:{}", speaker + 1)
+}
+
+/// Diarization starts numbering speakers again for each independently processed file.
+fn recording_speaker_label(session: Option<i64>, label: String) -> String {
+    match session {
+        Some(session) => format!("import:{session}:{label}"),
+        None => label,
+    }
 }
 
 async fn optional_cleanup(

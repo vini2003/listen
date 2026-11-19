@@ -15,10 +15,10 @@ export function recordButtonState(
   if (meeting.status === "recording") return { kind: "stop", label: "Stop recording" };
   if (meeting.status === "processing") return { kind: "processing", label: "Transcribing recording" };
   if (activeRecording && activeRecording.id !== meeting.id) {
-    return { kind: "blocked", label: `Recording “${activeRecording.title}” — stop it before starting another` };
+    return { kind: "blocked", label: `Stop recording “${activeRecording.title}” first` };
   }
   if (meeting.durationMs > 0 && meeting.audioDirectory) {
-    return { kind: "resume", label: "Resume recording — new audio is added to this meeting", confirm: hasTranscript };
+    return { kind: "resume", label: "Add audio to this meeting", confirm: hasTranscript };
   }
   return { kind: "start", label: "Start recording" };
 }

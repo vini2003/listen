@@ -25,7 +25,7 @@ function setup(count: number) {
   useWorkspace.setState({ segments, people: [], segmentsLoading: false });
   const transport: MeetingPlayback = {
     available: true, status: "ready", playing: true, currentMs: 500,
-    durationMs: meeting.durationMs, toggle: vi.fn(), seek: vi.fn(), pause: vi.fn(),
+    durationMs: meeting.durationMs, toggle: vi.fn(), seek: vi.fn(), playFrom: vi.fn(), pause: vi.fn(),
   };
   const props = { meeting, transport, onOpenPeople: vi.fn(), onOpenSettings: vi.fn() };
   return { props, ...render(<Transcript {...props} />) };
@@ -47,9 +47,9 @@ it("rerenders only the old and new active rows in a 1,000-row transcript", () =>
 
 it("memoized timestamp actions use the latest committed playback callback", () => {
   const { props, rerender } = setup(2);
-  const seek = vi.fn();
-  rerender(<Transcript {...props} transport={{ ...props.transport, seek }} />);
+  const playFrom = vi.fn();
+  rerender(<Transcript {...props} transport={{ ...props.transport, status: "idle", playing: false, playFrom }} />);
   fireEvent.click(screen.getAllByTitle("Play from here")[1]);
-  expect(seek).toHaveBeenCalledWith(1000);
-  expect(props.transport.seek).not.toHaveBeenCalled();
+  expect(playFrom).toHaveBeenCalledWith(1000);
+  expect(props.transport.playFrom).not.toHaveBeenCalled();
 });
